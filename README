@@ -2,11 +2,13 @@ Decache
 
 -----
 
-Decache is a simple utility to extract working and completely valid files from an iOS dyld shared cache.
+Decache is a simple utility to extract working and completely valid files from an iOS dyld shared cache.  It requires a non-mmaped dyld cache: do not use ssh to extract the cache from your device; use rsync or equivalents.
 
 Usage:
-  decache -c cache -x <extract name> [-o <out file name>]
+  decache -c /path/to/cachecache -x <extract name> [-o <out file name>]
 
-Sorry, wildcards are not yet supported.  So you have to extract the individual files.   However, you can use an option like "-x UIKit".  
+Sorry, wildcards are not yet supported.  So you have to extract the individual files.   However, you can use an option like "-x UIKit".
 
 Also, I do not add code signatures.  Sorry!
+
+

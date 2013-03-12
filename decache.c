@@ -51,6 +51,8 @@ struct dyld_cache_header {
 	uint64_t codeSignatureSize;
 	uint64_t slideInfoOffset;
 	uint64_t slideInfoSize;
+	uint64_t localSymbolsOffset;
+	uint64_t localSymbolsSize;
 };
 
 
@@ -81,6 +83,22 @@ struct dyld_cache_slide_info {
 	// entrybitmap entries[entries_count];
 };
 
+typedef struct _dyld_cache_local_symbols_info {
+    uint32_t nlistOffset;
+    uint32_t nlistCount;
+    uint32_t stringsOffset;
+    uint32_t stringsSize;
+    uint32_t entriesOffset;
+    uint32_t entriesCount;
+} dyld_cache_local_symbols_info;
+
+typedef struct _dyld_cache_local_symbols_entry {
+    uint32_t dylibOffset;
+    uint32_t nlistStartIndex;
+    uint32_t nlistCount;
+} dyld_cache_local_symbols_entry;
+
+
 struct dyld_cache_slide_info_entry {
 	uint8_t bits[4096/(8*4)];
 };
@@ -90,6 +108,7 @@ struct dyld_cache_header *dyldHead = NULL;
 uint64_t dyld_vmbase = 0;
 uint64_t dyld_vmextent = 0;
 dyld_cache_image_info* image_infos = NULL;
+dyld_cache_local_symbols_info *localSymbols = NULL;
 
 
 uintptr_t locate_address(uint32_t addr, bool printSource = 0)
@@ -1928,7 +1947,9 @@ void extract_file(uintptr_t xbuf, const char* fname)
 				}
 				else
 				{
-					PANIC("Unrecognized segment in file");
+				//	PANIC("Unrecognized segment in file");
+					
+					
 				}
 			}
 			lcptr += ((load_command*) lcptr)->cmdsize;
@@ -2684,11 +2705,53 @@ void extract_file(uintptr_t xbuf, const char* fname)
 		
 		
 		
+		
+		
+		struct nlist* nl2 = NULL;
+		int nsyms2 = 0;
+		const char *cacheStrings = (const char*) ((uintptr_t)localSymbols + localSymbols->stringsOffset);
+		{
+			dyld_cache_local_symbols_entry *localEntry = NULL;
+			
+			{
+				dyld_cache_local_symbols_entry *localEntries = (dyld_cache_local_symbols_entry *) (((uintptr_t)localSymbols) + localSymbols->entriesOffset);
+				CommonLog("");
+			
+				for(int i=0; i < localSymbols->entriesCount; i++)
+				{
+				//	CommonLog("%d %d", i, localSymbols->entriesCount);
+
+					if(localEntries[i].dylibOffset == tseg.old.vmaddr.start - dyld_vmbase)
+					{
+						localEntry = &localEntries[i];
+						break;
+					}
+				}
+			}
+			if(localEntry)
+			{
+				nl2 = (struct nlist *) ((uintptr_t)localSymbols + localSymbols->nlistOffset);
+				nl2 = &nl2[localEntry->nlistStartIndex];
+				nsyms2 = localEntry->nlistCount;
+			}
+		}
+		
+		
 		sym->stroff = nfile;
 		for(int i=0; i<nsyms; i++)
 		{
 			const char* str = &strs[ nl[i].n_un.n_strx];
 			nl[i].n_un.n_strx = nfile - sym->stroff;
+			if(!strcmp(str, "<redacted>") && nl2)
+			{
+				for(int j=0; j<nsyms2; j++)
+				{
+					if(nl2[j].n_value == nl[i].n_value)
+					{
+						str = &cacheStrings[nl2[i].n_un.n_strx];
+					}
+				}
+			}
 			
 			{
 				uint32_t* nvalue = &nl[i].n_value;
@@ -2706,7 +2769,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 					{}
 				}
 				
-			//	CommonLog("%08x %s (%s)", nvalue, str, region);
+			//	CommonLog("%p %s", nvalue, str);
 			}
 					
 			
@@ -2718,6 +2781,12 @@ void extract_file(uintptr_t xbuf, const char* fname)
 			
 		}
 		sym->strsize = nfile - sym->stroff;
+		
+		
+		
+		
+		
+		//exit(1);
 		/*
 		memcpy(fbuf + nfile;
 		symoff = 
@@ -2869,6 +2938,7 @@ int main(int argc, char** argv)
 	//PANIC("imageOffset %x count %x", dyldHead->imagesOffset, dyldHead->imagesCount);
 	
 	image_infos = (dyld_cache_image_info*) (dyld_buf + dyldHead->imagesOffset);
+	localSymbols = (dyld_cache_local_symbols_info*) (dyld_buf + dyldHead->localSymbolsOffset);
 	
 	if(!extractname)
 	{
@@ -2880,6 +2950,7 @@ int main(int argc, char** argv)
 		}
 		exit(1);
 	}
+	
 	
 	/*
 	dyld_cache_mapping_info* mapping = (dyld_cache_mapping_info*) (dyld_buf + dyldHead->mappingOffset);

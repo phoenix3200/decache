@@ -7,7 +7,6 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
-#include <map>
 #include <syslog.h>
 
 
