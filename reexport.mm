@@ -103,6 +103,7 @@ static uintptr_t read_uleb128(const uint8_t*& p, const uint8_t* end)
 	return result;
 }
 
+/*
 static intptr_t read_sleb128(const uint8_t*& p, const uint8_t* end)
 {
 	int64_t result = 0;
@@ -118,6 +119,7 @@ static intptr_t read_sleb128(const uint8_t*& p, const uint8_t* end)
 		result |= (-1LL) << bit;
 	return result;
 }
+*/
 
 /*
 struct exported_node

@@ -1,27 +1,18 @@
 
-CC = g++
-CFLAGS = -c
-UNAME := $(shell uname)
 
-ifeq ($(UNAME), Linux)
-	LFLAGS += -lrt
-endif
+TOOL_NAME = decache
 
-all: decache
+decache_INSTALL_PATH = /usr/bin
+decache_OBJCC_FILES = \
+    decache.mm\
+    reexport.mm
+    
+decahe_LDFLAGS = -ggdb
 
-decache:
-	@echo "Making decache..."
-	@$(CC) -O3 decache.c -c -ggdb $(LFLAGS)
-	@$(CC) -O3 reexport.c -c -ggdb $(LFLAGS)
-	@$(CC) -O3 decache.o reexport.o -o decache -ggdb $(LFLAGS)
+# SDKVERSION = 3.0
+# TARGET = native
+TARGET = iphone
 
-compare:
-	@echo "Making compare..."
-	@$(CC) -O3 compare.c -o compare -ggdb $(LFLAGS)
-
-
-
-.PHONY: decache compare
-
-
+include theos/makefiles/common.mk
+include theos/makefiles/tool.mk
 

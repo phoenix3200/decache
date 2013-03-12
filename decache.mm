@@ -129,7 +129,7 @@ uintptr_t locate_address(uint32_t addr, bool printSource = 0)
 		
 		int ncmds = header->ncmds;
 		intptr_t lcptr = xbuf + sizeof(mach_header);
-		for(uint32_t j=0; j<ncmds; j++)
+		for(int j=0; j<ncmds; j++)
 		{
 			uint32_t cmd = ((load_command*) lcptr)->cmd;
 
@@ -284,7 +284,7 @@ void print_segment(segment_command* seg)
 	if(seg->nsects)
 	{
 		section* sects = (section*) ((uintptr_t) seg + sizeof(segment_command));
-		for(int i=0; i<seg->nsects; i++)
+		for(uint32_t i=0; i<seg->nsects; i++)
 		{
 			section* sect = &sects[i];
 			CommonLog("%.16s has section %.16s (%s) (+%x) (%x+%x)",
@@ -433,7 +433,7 @@ struct rebase_info
 {
 	uintptr_t buf;
 	uintptr_t currptr;
-	int nBuf;
+	uint32_t nBuf;
 	
 	uintptr_t dataseg_base;	// dseg->fix.buf
 	
@@ -764,7 +764,7 @@ void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 			
 			uint32_t* tofix = (uint32_t*) (data + 8 + offs);
 			
-			uint32_t old = *tofix;
+			//uint32_t old = *tofix;
 			
 			uintptr_t pcdata = data + 4;
 			{
@@ -925,7 +925,7 @@ void abs32z_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 void lazy_fix(uintptr_t fbuf, section* sect, section* stubs, seg_adjust* tseg, seg_adjust* dseg, rebase_info* rebase)
 {
 	uint32_t *lazy_arr = (uint32_t*) (fbuf + sect->offset);
-	int nlazy = sect->size / sizeof(uint32_t);
+	//int nlazy = sect->size / sizeof(uint32_t);
 	
 	uintptr_t start = fbuf + stubs->offset;
 	uintptr_t end = start + stubs->size;
@@ -938,7 +938,7 @@ void lazy_fix(uintptr_t fbuf, section* sect, section* stubs, seg_adjust* tseg, s
 		{
 			if(index >= 0)
 			{
-				int goal = data - fbuf;
+				uint32_t goal = data - fbuf;
 				if(lazy_arr[index] != goal)
 				{
 					push_rebase_entry(rebase, (uintptr_t) &lazy_arr[index]);
@@ -1139,7 +1139,7 @@ void fix_methods(uintptr_t fbuf, list_t* head, section* __objc_methname, seg_adj
 	head->entsize = 0xC;	// fix the 0xf in the cache
 	
 	method_t* methods = (method_t*) ((uintptr_t)head + sizeof(list_t));
-	method_t static_method;
+	//method_t static_method;
 	
 	resolve_methname(fbuf, &methods[0].name, __objc_methname, tseg, rebase, nowarn);
 	if(seg_virtresolve(&methods[0].types, tseg))
@@ -1685,7 +1685,7 @@ void hack_export_callback(exported_node* node, uintptr_t ctx)
 	}
 	else
 	{
-		uint32_t orig = node->stub;
+		//uint32_t orig = node->stub;
 		
 		//fprintf(stdout, ".EXPORT(%d) %08x %08x %s\n", node->flags, node->stub, orig, node->base);
 		
@@ -1765,13 +1765,13 @@ segment_command* find_segment(uintptr_t fbuf, const char* name)
 	mach_header* header = (mach_header*) fbuf;
 	
 	uint32_t ncmds = header->ncmds;
-	uint32_t sizeofcmds = header->sizeofcmds;
+	//uint32_t sizeofcmds = header->sizeofcmds;
 	uintptr_t cmd_base = fbuf + sizeof(mach_header);
 	
 	
 	// first scan: make sure we have space
 	{
-		uint32_t lowestOffset;
+		//uint32_t lowestOffset;
 		
 		uintptr_t lcptr = cmd_base;
 		for(uint32_t i=0; i<ncmds; i++)
@@ -1878,6 +1878,10 @@ section* append_section(uintptr_t fbuf, section* newsect)
 			lcptr += ((load_command*) lcptr)->cmdsize;
 		}
 	}
+	
+	return NULL;
+	
+	
 }
 
 void remove_commandtype(uintptr_t fbuf, int cmd)
@@ -2077,7 +2081,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 		uint32_t dataCacheOffset = mapping[1].address;
 	
 		dyld_cache_slide_info* slide = (dyld_cache_slide_info*) (dyld_buf + dyldHead->slideInfoOffset);
-		int slideSize = dyldHead->slideInfoSize;
+		//int slideSize = dyldHead->slideInfoSize;
 	
 		uint16_t *slide_toc_index  = (uint16_t*) ((uintptr_t)slide + slide->toc_offset);
 		dyld_cache_slide_info_entry* slide_entries = (dyld_cache_slide_info_entry*) ((uintptr_t)slide + slide->entries_offset);
@@ -2171,11 +2175,11 @@ void extract_file(uintptr_t xbuf, const char* fname)
 	section* __objc_const = NULL;
 	
 	section* __data = NULL;
-	section* __objc_data = NULL;
+	//section* __objc_data = NULL;
 	
 	
 	{
-		intptr_t lcptr = fbuf + sizeof(mach_header);
+		uintptr_t lcptr = fbuf + sizeof(mach_header);
 		
 		for(uint32_t i=0; i<ncmds; i++)
 		{
@@ -2717,7 +2721,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 				dyld_cache_local_symbols_entry *localEntries = (dyld_cache_local_symbols_entry *) (((uintptr_t)localSymbols) + localSymbols->entriesOffset);
 				CommonLog("");
 			
-				for(int i=0; i < localSymbols->entriesCount; i++)
+				for(uint32_t i=0; i < localSymbols->entriesCount; i++)
 				{
 				//	CommonLog("%d %d", i, localSymbols->entriesCount);
 
@@ -2803,7 +2807,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 		uint32_t dataCacheOffset = mapping[1].address;
 	
 		dyld_cache_slide_info* slide = (dyld_cache_slide_info*) (dyld_buf + dyldHead->slideInfoOffset);
-		int slideSize = dyldHead->slideInfoSize;
+		//int slideSize = dyldHead->slideInfoSize;
 	
 		uint16_t *slide_toc_index  = (uint16_t*) ((uintptr_t)slide + slide->toc_offset);
 		dyld_cache_slide_info_entry* slide_entries = (dyld_cache_slide_info_entry*) ((uintptr_t)slide + slide->entries_offset);
@@ -2915,16 +2919,37 @@ int main(int argc, char** argv)
 	int dyld_fd = open(dyld_name, O_RDONLY);
 	if(dyld_fd == -1)
 		PANIC("Could not open dyld cache %s", dyld_name);
-	
 	int dyld_n = fsize(dyld_fd);
 	
-	dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_SHARED, dyld_fd, 0);
+#ifdef TARGET_IPHONE	
+	uint32_t cacheFileSize = dyld_n;
+	uint32_t cacheAllocatedSize = (cacheFileSize + 4095) & (-4096);
+    uint8_t* mappingAddr = NULL;
+	if ( vm_allocate(mach_task_self(), (vm_address_t*)(&mappingAddr), cacheAllocatedSize, VM_FLAGS_ANYWHERE) != KERN_SUCCESS )
+        PANIC("can't vm_allocate cache of size %u", cacheFileSize);
+
+ 	fcntl(dyld_fd, F_NOCACHE, 1);
+    uint32_t readResult = pread(dyld_fd, mappingAddr, cacheFileSize, 0);
+    
+    if(readResult != cacheFileSize)
+    {
+    	PANIC("Unable to load entire cache into memory :(");
+    }
+	dyld_buf = (uintptr_t) mappingAddr;
+#else
+    dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_SHARED, dyld_fd, 0);
+#endif
+		   
+	
+	
+	
+	
 	dyldHead = (dyld_cache_header *)dyld_buf;
 	dyld_vmbase = *(uint64_t *)(dyld_buf + dyldHead->mappingOffset);
 	
 	{
 		dyld_cache_mapping_info* mapping = (dyld_cache_mapping_info*) (dyld_buf + dyldHead->mappingOffset);
-		for(int i=0; i<dyldHead->mappingCount; i++)
+		for(uint32_t i=0; i<dyldHead->mappingCount; i++)
 		{
 			if(mapping[i].address + mapping[i].size > dyld_vmextent)
 			{
@@ -2944,7 +2969,7 @@ int main(int argc, char** argv)
 	{
 		for(uint32_t i=0; i< dyldHead->imagesCount; i++)
 		{
-			uint64_t vm_address = image_infos[i].address;
+			//uint64_t vm_address = image_infos[i].address;
 			const char *filename = (const char *)(dyld_buf + image_infos[i].pathFileOffset);
 			fprintf(stderr, "%s\n", filename);
 		}
@@ -2964,7 +2989,10 @@ int main(int argc, char** argv)
 	*/
 	
 	uint32_t extract_offs;
-	const dyld_cache_image_info* extract_info = find_file(extractname, &extract_offs);
+	
+	//const dyld_cache_image_info* extract_info =
+	find_file(extractname, &extract_offs);
+	
 	
 	//CommonLog("File found at %x %llx : %llx", extract_offs, base_mapping + extract_offs, extract_info->inode);
 	uintptr_t extract_buf = dyld_buf + extract_offs;
@@ -2999,9 +3027,11 @@ int main(int argc, char** argv)
 	//print_vmaddr(dyld_buf, dyld_n);
 	
 	
-	
-	
+#ifdef TARGET_IPHONE	
+	vm_deallocate(mach_task_self(), (vm_address_t)mappingAddr, cacheAllocatedSize);
+#else
 	munmap((void*)dyld_buf, dyld_n);
+#endif
 	close(dyld_fd);
 	
 	CommonLog("Done!");
