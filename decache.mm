@@ -2924,17 +2924,16 @@ int main(int argc, char** argv)
 #ifdef TARGET_IPHONE	
 	uint32_t cacheFileSize = dyld_n;
 	uint32_t cacheAllocatedSize = (cacheFileSize + 4095) & (-4096);
-    uint8_t* mappingAddr = NULL;
+	uint8_t* mappingAddr = NULL;
 	if ( vm_allocate(mach_task_self(), (vm_address_t*)(&mappingAddr), cacheAllocatedSize, VM_FLAGS_ANYWHERE) != KERN_SUCCESS )
-        PANIC("can't vm_allocate cache of size %u", cacheFileSize);
+		PANIC("can't vm_allocate cache of size %u", cacheFileSize);
 
- 	fcntl(dyld_fd, F_NOCACHE, 1);
-    uint32_t readResult = pread(dyld_fd, mappingAddr, cacheFileSize, 0);
-    
-    if(readResult != cacheFileSize)
-    {
-    	PANIC("Unable to load entire cache into memory :(");
-    }
+	fcntl(dyld_fd, F_NOCACHE, 1);
+	uint32_t readResult = pread(dyld_fd, mappingAddr, cacheFileSize, 0);
+
+	if(readResult != cacheFileSize)
+		PANIC("Unable to load entire cache into memory :(");
+
 	dyld_buf = (uintptr_t) mappingAddr;
 #else
     dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_SHARED, dyld_fd, 0);
