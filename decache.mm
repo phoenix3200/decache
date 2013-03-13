@@ -4,7 +4,7 @@
 #include "reexport.h"
 
 #ifdef TARGET_IPHONE
-	//#define READ_VM
+	#define READ_VM
 #endif
 
 static inline int fsize(int fd)
