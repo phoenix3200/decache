@@ -15,12 +15,12 @@ struct exported_node
 	uint32_t resolver;
 	uint32_t ordinal;
 	
-	char base[0x80];
+	char base[0x200];
 
-	char reexport[0x80];
+	char reexport[0x200];
 	
 	
-	char terminal[0x80];
+	char terminal[0x200];
 };
 
 

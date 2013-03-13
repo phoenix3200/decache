@@ -3,6 +3,10 @@
 
 #include "reexport.h"
 
+#ifdef TARGET_IPHONE
+	//#define READ_VM
+#endif
+
 static inline int fsize(int fd)
 {
 	struct stat results;
@@ -308,6 +312,9 @@ int fdcreate(const char* name, int nfile, uintptr_t* buf)
 	ftruncate(fd, nfile);
 	*buf = (uintptr_t) mmap(NULL, nfile, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	memset((void*)*buf, 0, nfile);
+
+//	CommonLog("fd = %d", fd);
+
 	return fd;
 }
 
@@ -329,9 +336,11 @@ void fdclose(int fd, uintptr_t* buf)
 
 void fdtrimclose(int fd, int nfile, uintptr_t* buf)
 {
+//	CommonLog("fd = %d", fd);
 	int oldn = fsize(fd);
 	munmap((void*) *buf, oldn);
 	ftruncate(fd, nfile);
+//	CommonLog("closing fd = %d", fd);
 	close(fd);
 }
 
@@ -394,6 +403,9 @@ struct seg_adjust
 
 void seg_applyoffset(segment_command* seg, seg_adjust* adjust)
 {
+	if(!seg)
+		return;
+	
 	uint32_t dvmaddr = adjust->dvmaddr;
 	uint32_t doffset = adjust->doffset;
 //	CommonLog("Adjust: %x %x", dvmaddr, doffset);
@@ -788,7 +800,8 @@ void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 			{
 				if(panicbit)
 				{
-					CommonLog("WARNING: Patching entry from context: %lx = %x", data - fbuf, *tofix);
+				//	CommonLog("WARNING: Patching entry from context: %lx = %x", data - fbuf, *tofix);
+				
 				//	uintptr_t dest = locate_address(*tofix, 1);
 				}
 				lastfix += 4;
@@ -1007,7 +1020,7 @@ void resolve_methnames(uintptr_t fbuf, section* sect, section* __objc_methname, 
 			}
 			else
 			{
-				PANIC("Failed to find method \'%s\'(%x) at %lu", str, *pointer, (uintptr_t)pointer - fbuf);
+				PANIC("Failed to find method \'%s\'(%x, %x) at %lx", str, (uint32_t)((uintptr_t)str - (uintptr_t)dyld_buf), *pointer, (uintptr_t)pointer - fbuf);
 				
 			}
 		}
@@ -1274,8 +1287,18 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 	
 	if(cls->ivarLayout)
 	{
-		seg_virtresolve(&cls->ivarLayout, dseg);
-		PANIC("ivarlayout at %x; dont know what we're doing!", cls->ivarLayout);
+		if(seg_virtresolve(&cls->ivarLayout, dseg))
+		{
+			
+		}
+		else if(in_dyld_cache(cls->ivarLayout))
+		{
+			PANIC("ivarlayout at %x; dont know what we're doing!", cls->ivarLayout);
+		}
+		else
+		{
+			CommonLog("WARNING: ivar layout; we don't know how to handle this!");
+		}
 	}
 	
 	if(cls->baseMethods)
@@ -1365,7 +1388,15 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 		{
 			PANIC("Cannot handle weak ivar copying yet!");
 		}
-		PANIC("Weak ivar layout?? HALP!");
+		else
+		{
+			CommonLog("WARNING: Weak ivar layout; we don't know how to handle this!");
+		}
+		//PANIC("Weak ivar layout?? HALP!");
+		
+		
+		
+		
 		//seg_virtresolve(&cls->weakIvarLayout, dseg);
 	}
 	
@@ -1725,7 +1756,7 @@ int hack_export_commands(uintptr_t src, uint32_t size, seg_adjust* tseg, seg_adj
 	context.tseg = tseg;
 	context.dseg = dseg;
 	
-	char strbuf[0x100];
+	char strbuf[0x200];
 	
 	scan_export_tree((uint8_t*)src, size, strbuf, hack_export_callback, (uintptr_t) &context);
 	
@@ -1738,7 +1769,10 @@ int hack_export_commands(uintptr_t src, uint32_t size, seg_adjust* tseg, seg_adj
 	//exit(1);
 	
 	
-	print_export_commands(src, size);
+	// DEBUG****
+	//print_export_commands(src, size);
+	
+	
 	
 	return size;
 	
@@ -1848,7 +1882,10 @@ section* append_section(uintptr_t fbuf, section* newsect)
 			lcptr += ((load_command*) lcptr)->cmdsize;
 		}
 		if(lowestOffset < sizeof(mach_header) + sizeofcmds + sizeof(section))
-			PANIC("Space not available for new section: %x %lx %lx", lowestOffset, sizeof(mach_header) + sizeofcmds, sizeof(mach_header) + sizeofcmds + sizeof(section));
+		{
+		//	CommonLog("Space not available for new section: %x %lx %lx", lowestOffset, sizeof(mach_header) + sizeofcmds, sizeof(mach_header) + sizeofcmds + sizeof(section));
+			return NULL;
+		}
 	}
 	{
 		uintptr_t lcptr = cmd_base;
@@ -1878,9 +1915,7 @@ section* append_section(uintptr_t fbuf, section* newsect)
 			lcptr += ((load_command*) lcptr)->cmdsize;
 		}
 	}
-	
 	return NULL;
-	
 	
 }
 
@@ -1895,7 +1930,7 @@ void remove_commandtype(uintptr_t fbuf, int cmd)
 
 
 
-void extract_file(uintptr_t xbuf, const char* fname)
+void extract_file(uintptr_t xbuf, const char* fname)//name)
 {
 	mach_header* header = (mach_header*) xbuf;
 	
@@ -1908,7 +1943,6 @@ void extract_file(uintptr_t xbuf, const char* fname)
 	}
 	
 	uint32_t ncmds = header->ncmds;
-	
 	
 	
 	
@@ -1959,7 +1993,27 @@ void extract_file(uintptr_t xbuf, const char* fname)
 			lcptr += ((load_command*) lcptr)->cmdsize;
 		}
 		
-		nfile = text->vmsize + data->vmsize;
+		nfile = (text ? text->vmsize : 0) + (data ? data->vmsize : 0);
+		
+		//CommonLog("WARNING: No data section!");
+		
+		
+		char fpath[0x80];
+		
+		const char* fnptr = fname;
+		{
+			while((fnptr = strchr(fnptr, '/')))
+			{
+				int n = fnptr - fname;
+				memcpy(fpath, fname, n);
+				fpath[n]=0;
+				mkdir(fpath, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
+				fnptr++;
+			}
+		}
+		
+		
+		
 		fd = fdcreate(fname, nfile + 0x1000000, &fbuf);	// allocate 1MB extra for the linkedit.  maybe not enough?
 		
 		{
@@ -1985,11 +2039,12 @@ void extract_file(uintptr_t xbuf, const char* fname)
 			text->vmaddr = tseg.new.vmaddr.start;
 			text->fileoff = tseg.new.fileoff.start;
 			*/
-			CommonLog("text vmaddr: %x to %x", tseg.old.vmaddr.start, tseg.fix.vmaddr.start);
-			CommonLog("text offset: %x to %x", tseg.old.offset.start, tseg.fix.offset.start);
+		//	CommonLog("text vmaddr: %x to %x", tseg.old.vmaddr.start, tseg.fix.vmaddr.start);
+		//	CommonLog("text offset: %x to %x", tseg.old.offset.start, tseg.fix.offset.start);
 			
 		}
 		
+		if(data)
 		{
 			dseg.old.vmaddr.start = data->vmaddr;
 			dseg.old.vmaddr.end   = data->vmaddr + data->vmsize;
@@ -2009,29 +2064,32 @@ void extract_file(uintptr_t xbuf, const char* fname)
 			dseg.dvmaddr = dseg.fix.vmaddr.start - dseg.old.vmaddr.start;
 			dseg.doffset = dseg.fix.offset.start - dseg.old.offset.start;
 			
-			CommonLog("data vmaddr: %x to %x", dseg.old.vmaddr.start, dseg.fix.vmaddr.start);
-			CommonLog("data offset: %x to %x", dseg.old.offset.start, dseg.fix.offset.start);
+		//	CommonLog("data vmaddr: %x to %x", dseg.old.vmaddr.start, dseg.fix.vmaddr.start);
+		//	CommonLog("data offset: %x to %x", dseg.old.offset.start, dseg.fix.offset.start);
 			
+		}
+		else
+		{
+			dseg.old.vmaddr.start = 0;
+			dseg.old.vmaddr.end   = 0;
+			dseg.old.offset.start = 0;
+			dseg.old.offset.end   = 0;
+			dseg.old.buf = 0;
+			
+			
+			dseg.fix.vmaddr.start = tseg.fix.vmaddr.end;
+			dseg.fix.vmaddr.end   = tseg.fix.vmaddr.end;
+			dseg.fix.offset.start = tseg.fix.offset.end;
+			dseg.fix.offset.end   = tseg.fix.offset.end;
+			dseg.fix.buf = fbuf + text->vmsize;
+			
+			dseg.dvmaddr = dseg.fix.vmaddr.start - dseg.old.vmaddr.start;
+			dseg.doffset = dseg.fix.offset.start - dseg.old.offset.start;
+
 		}
 	}
 	
-	struct section __objc_extradata_raw = 
-		{
-			"__objc_xtradata",
-			"__DATA",
-			dseg.old.vmaddr.end,
-			0,
-			dseg.old.offset.end,
-			2,
-			0,
-			0,
-			0,
-			0,
-			0
-		};
-	struct section* __objc_extradata = append_section(fbuf, &__objc_extradata_raw);
 	
-	CommonLog("objc_extradata %x %x", __objc_extradata->addr, __objc_extradata->offset);
 	
 	header = (mach_header*) fbuf;
 	
@@ -2091,6 +2149,8 @@ void extract_file(uintptr_t xbuf, const char* fname)
 		uint32_t missed = 0;
 		uint32_t missed_z = 0;
 		uint32_t missed_dyld = 0;
+		
+		
 		for(uint32_t i = (dseg.old.vmaddr.start - dataCacheOffset) / 0x1000, k=0; i < (dseg.old.vmaddr.end - dataCacheOffset) / 0x1000; i++, k++)
 		{
 			uint8_t *bits = slide_entries[slide_toc_index[i]].bits;
@@ -2139,10 +2199,35 @@ void extract_file(uintptr_t xbuf, const char* fname)
 			}
 			//PANIC("Done trying");
 		}
-		CommonLog("Easily resolved %d text, %d data references.  Missed %d external, %d zero, and %d other symbols.", foundt, foundd, missed_dyld, missed_z, missed);
+		//CommonLog("Easily resolved %d text, %d data references.  Missed %d external, %d zero, and %d other symbols.", foundt, foundd, missed_dyld, missed_z, missed);
 		//CommonLog("Now %d entries", reloc.nEntries);
 	}
 	
+	
+	struct section* __objc_extradata = NULL;
+	//if(objc)
+	{
+		struct section __objc_extradata_raw = 
+			{
+				"__objc_xtradata",
+				"__DATA",
+				dseg.old.vmaddr.end,
+				0,
+				dseg.old.offset.end,
+				2,
+				0,
+				0,
+				0,
+				0,
+				0
+			};
+		__objc_extradata = append_section(fbuf, &__objc_extradata_raw);
+		
+		if(__objc_extradata)
+		{
+		//	CommonLog("objc_extradata %x %x", __objc_extradata->addr, __objc_extradata->offset);
+		}
+	}
 	
 	
 	segment_command* linkedit = NULL;
@@ -2177,6 +2262,8 @@ void extract_file(uintptr_t xbuf, const char* fname)
 	section* __data = NULL;
 	//section* __objc_data = NULL;
 	
+	
+	bool objc = 0;
 	
 	{
 		uintptr_t lcptr = fbuf + sizeof(mach_header);
@@ -2220,10 +2307,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 									{
 									//	abs32_fix(fbuf, sect, &tseg, &dseg);
 									}
-									else if(!strncmp(sect->sectname, "__ustring", 16))
-									{
-										
-									}
+									
 									/*
 									else if(!strncmp(sect->sectname, "__gcc_except_tab", 16))
 									{
@@ -2254,14 +2338,17 @@ void extract_file(uintptr_t xbuf, const char* fname)
 								{
 									if(!strncmp(sect->sectname, "__objc_methname", 16))
 									{
+										objc = 1;
 										__objc_methname = sect;
 									}
 									else if(!strncmp(sect->sectname, "__objc_classname", 16))
 									{
+										objc = 1;
 										__objc_classname = sect;
 									}
 									else if(!strncmp(sect->sectname, "__objc_methtype", 16))
 									{
+										objc = 1;
 										__objc_methtype = sect;
 									}
 									else if(!strncmp(sect->sectname, "__cstring", 16))
@@ -2311,6 +2398,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 									}
 									else if(!strncmp(sect->sectname, "__objc_data", 16))
 									{
+										objc = 1;
 									//	__objc_data = sect;
 										
 										// disable the z bit so we can find problems :)
@@ -2319,50 +2407,61 @@ void extract_file(uintptr_t xbuf, const char* fname)
 									}
 									else if(!strncmp(sect->sectname, "__objc_classlist", 16))
 									{
-										CommonLog("Found __objc_classlist");
+										objc = 1;
+									//	CommonLog("Found __objc_classlist");
 										__objc_classlist = sect;
 										extz_fix(fbuf, sect, &tseg, &dseg);
 									}
 									else if(!strncmp(sect->sectname, "__objc_catlist", 16))
 									{
-										CommonLog("Found __objc_catlist");
+										objc = 1;
+									//	CommonLog("Found __objc_catlist");
 										__objc_catlist = sect;
-										CommonLog("size is %x", sect->size);
+									//	CommonLog("size is %x", sect->size);
 										extz_fix(fbuf, sect, &tseg, &dseg);
 									}
 									else if(!strncmp(sect->sectname, "__objc_protolist", 16))
 									{
-										CommonLog("Found __objc_protolist");
+										objc = 1;
+									//	CommonLog("Found __objc_protolist");
 										__objc_protolist = sect;
 										extz_fix(fbuf, sect, &tseg, &dseg);
 									}
 									else if(!strncmp(sect->sectname, "__objc_protorefs", 16))
 									{
+										objc = 1;
 										extz_fix(fbuf, sect, &tseg, &dseg);
 									}
 									else if(!strncmp(sect->sectname, "__objc_classrefs", 16))
 									{
+										objc = 1;
 										extz_fix(fbuf, sect, &tseg, &dseg);
 									}
 									else if(!strncmp(sect->sectname, "__objc_superrefs", 16))
 									{
+										objc = 1;
 										extz_fix(fbuf, sect, &tseg, &dseg);
 									}
 									
 									
 									else if(!strncmp(sect->sectname, "__objc_const", 16))
 									{
+										objc = 1;
 										__objc_const = sect;
 									}
 									else if(!strncmp(sect->sectname, "__objc_imageinfo", 16))
 									{
+										objc = 1;
 										((uint32_t*)(fbuf + sect->offset))[1] &= ~8;
 										
 									}
 									else if(!strncmp(sect->sectname, "__objc_ivar", 16))
 									{
+										objc = 1;
 									}
-									
+									else if(!strncmp(sect->sectname, "__objc_xtradata", 16))
+									{
+									}
 									
 									else
 									{
@@ -2398,6 +2497,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 								{
 									if(!strncmp(sect->sectname, "__objc_selrefs", 16))
 									{
+										objc = 1;
 										resolve_methnames(fbuf, sect, __objc_methname, &tseg, &rebase);
 									}
 									
@@ -2438,14 +2538,28 @@ void extract_file(uintptr_t xbuf, const char* fname)
 				break;
 			case LC_SOURCE_VERSION:
 				break;
+			case LC_REEXPORT_DYLIB:
+				break;
+			case LC_LOAD_WEAK_DYLIB:
+				break;
 			default:
-				CommonLog("Load command %x not yet processed\n", cmd);
+				CommonLog("Load command %x not yet processed", cmd);
 				break;
 			}
+			//CommonLog("Load command %x at %x\n", cmd, (uint32_t)((uintptr_t) lcptr -fbuf));
+
 			lcptr += ((load_command*) lcptr)->cmdsize;
 		}
 		
 	}
+	
+	
+	if(objc && !__objc_extradata)
+	{
+		PANIC("Unable to add critical objc_xtradata section");
+	}
+	
+	
 	
 	//__objc_catlist->size = __objc_protolist->offset - __objc_catlist->offset;
 	
@@ -2475,6 +2589,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 	//	extz_fix(fbuf, __data, &tseg, &dseg);
 	}
 
+	if(__objc_extradata)
 	{
 		int nExtraData = vmalign(__objc_extradata->size);
 		__objc_extradata->size = nExtraData;
@@ -2603,11 +2718,15 @@ void extract_file(uintptr_t xbuf, const char* fname)
 	
 	if(dinfo)
 	{
-		
-
 		if(dinfo->rebase_size)
 		{
-			PANIC("HELP!");
+			fprintf(stderr, "%x = ", (uint32_t) ((uintptr_t)dinfo - (uintptr_t) fbuf));
+			for(uint32_t i=0; i<sizeof(dyld_info_command); i++)
+			{
+				fprintf(stderr, "%02x", ((unsigned char*)dinfo)[i]);
+			}
+			fprintf(stderr, "\n");
+			PANIC("HELP!"); // ??????
 		}
 		
 		push_rebase_entry(&rebase, 0);
@@ -2623,8 +2742,12 @@ void extract_file(uintptr_t xbuf, const char* fname)
 		}
 		
 		if(dinfo->bind_off)
-		{			
+		{
+		//	CommonLog("Copying %d bytes", dinfo->bind_size);
+			
 			memcpy((void*)(fbuf + nfile), (void*)(dyld_buf + dinfo->bind_off), dinfo->bind_size);
+			
+		//	CommonLog("Done.");
 			dinfo->bind_off = nfile;
 			nfile += dinfo->bind_size;
 		}
@@ -2645,11 +2768,11 @@ void extract_file(uintptr_t xbuf, const char* fname)
 			memcpy((void*)(fbuf + nfile), (void*)(dyld_buf + dinfo->export_off), dinfo->export_size);
 			dinfo->export_off = nfile;
 			
-			int oldsize = dinfo->export_size;
+		//	int oldsize = dinfo->export_size;
 			
 			dinfo->export_size = hack_export_commands(fbuf + dinfo->export_off, dinfo->export_size, &tseg, &dseg);
 			
-			CommonLog("Old export size: %x new size: %x", oldsize, dinfo->export_size);
+		//	CommonLog("Old export size: %x new size: %x", oldsize, dinfo->export_size);
 			nfile += dinfo->export_size;
 		}
 		
@@ -2719,8 +2842,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 			
 			{
 				dyld_cache_local_symbols_entry *localEntries = (dyld_cache_local_symbols_entry *) (((uintptr_t)localSymbols) + localSymbols->entriesOffset);
-				CommonLog("");
-			
+				
 				for(uint32_t i=0; i < localSymbols->entriesCount; i++)
 				{
 				//	CommonLog("%d %d", i, localSymbols->entriesCount);
@@ -2746,7 +2868,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 		{
 			const char* str = &strs[ nl[i].n_un.n_strx];
 			nl[i].n_un.n_strx = nfile - sym->stroff;
-			if(!strcmp(str, "<redacted>") && nl2)
+			if((str[0] == 0 || !strcmp(str, "<redacted>")) && nl2)
 			{
 				for(int j=0; j<nsyms2; j++)
 				{
@@ -2832,11 +2954,11 @@ void extract_file(uintptr_t xbuf, const char* fname)
 		}
 		if(missed_dyld)
 		{
-			CommonLog("Still missed %d slide external references! :(", missed_dyld);
+		//	CommonLog("Still missed %d slide external references! :(", missed_dyld);
 		}
 		else
 		{
-			CommonLog("Yay! Got rid of all the slide external references!");
+		//	CommonLog("Yay! Got rid of all the slide external references!");
 		}
 	}
 	
@@ -2851,7 +2973,7 @@ void extract_file(uintptr_t xbuf, const char* fname)
 	
 	// string operations ****
 	
-	CommonLog("Closing file.  Size = %x\n", nfile);
+	//CommonLog("Closing file.  Size = %x\n", nfile);
 	
 	fdtrimclose(fd, nfile, &fbuf);
 	
@@ -2917,11 +3039,16 @@ int main(int argc, char** argv)
 	
 	
 	int dyld_fd = open(dyld_name, O_RDONLY);
+	
+	//dyld_fd = dup(dyld_fd);
+	//dyld_fd = fcntl(dyld_fd, F_DUPFD, dyld_fd);
+	//dyld_fd = 256;
+	
 	if(dyld_fd == -1)
 		PANIC("Could not open dyld cache %s", dyld_name);
 	int dyld_n = fsize(dyld_fd);
 	
-#ifdef TARGET_IPHONE	
+#ifdef READ_VM
 	uint32_t cacheFileSize = dyld_n;
 	uint32_t cacheAllocatedSize = (cacheFileSize + 4095) & (-4096);
 	uint8_t* mappingAddr = NULL;
@@ -2936,7 +3063,13 @@ int main(int argc, char** argv)
 
 	dyld_buf = (uintptr_t) mappingAddr;
 #else
-    dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_SHARED, dyld_fd, 0);
+	// MAP_NOCACHE
+	fcntl(dyld_fd, F_NOCACHE, 1);
+	
+//	dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_ANON | MAP_NOCACHE, 0, 0);
+//	dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_SHARED, dyld_fd, 0);
+	dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_PRIVATE | MAP_NOCACHE, dyld_fd, 0);
+//	msync((void*)dyld_buf, dyld_n, MS_SYNC | MS_INVALIDATE);
 #endif
 		   
 	
@@ -2966,73 +3099,49 @@ int main(int argc, char** argv)
 	
 	if(!extractname)
 	{
+		char outpath[0x80];
+		
 		for(uint32_t i=0; i< dyldHead->imagesCount; i++)
 		{
-			//uint64_t vm_address = image_infos[i].address;
+			//
 			const char *filename = (const char *)(dyld_buf + image_infos[i].pathFileOffset);
-			fprintf(stderr, "%s\n", filename);
+			
+			if(outname)
+			{
+				uint64_t vm_address = image_infos[i].address;
+				uint32_t extract_offs = vm_address - dyld_vmbase;
+				sprintf(outpath, "%s/%s", outname, filename);
+				uintptr_t extract_buf = dyld_buf + extract_offs;
+
+				fprintf(stderr, "%s\n", filename);
+				extract_file(extract_buf, outpath);
+			}
+			else
+			{
+				fprintf(stderr, "%s\n", filename);
+			}
 		}
 		exit(1);
 	}
-	
-	
-	/*
-	dyld_cache_mapping_info* mapping = (dyld_cache_mapping_info*) (dyld_buf + dyldHead->mappingOffset);
-	uint32_t dataCacheOffset = mapping[1].address;
-	
-	dyld_cache_slide_info* slide = (dyld_cache_slide_info*) (dyld_buf + dyldHead->slideInfoOffset);
-	int slideSize = dyldHead->slideInfoSize;
-	
-	uint16_t *slide_toc_index  = (uint16_t*) ((uintptr_t)slide + slide->toc_offset);
-	dyld_cache_slide_info_entry* slide_entries = (dyld_cache_slide_info_entry*) ((uintptr_t)slide + slide->entries_offset);
-	*/
-	
-	uint32_t extract_offs;
-	
-	//const dyld_cache_image_info* extract_info =
-	find_file(extractname, &extract_offs);
-	
-	
-	//CommonLog("File found at %x %llx : %llx", extract_offs, base_mapping + extract_offs, extract_info->inode);
-	uintptr_t extract_buf = dyld_buf + extract_offs;
-	
-	/*
+	else
 	{
-	//	segment_command* data = find_segment(extract_buf, SEG_DATA);
-	//	uint32_t data_low = data->vmaddr;
-	//	uint32_t data_high = data_low + data->vmsize;
-				
-		
-		for(int i=(data_low-dataCacheOffset)/0x1000; i<(data_high-dataCacheOffset/0x1000); i++)
-		{
-			dyld_cache_slide_info_entry* entry = &entries[toc_index[i]];
-			for(int j=0; j<4096/4; j++)
-			{
-				if(entry->bits[j>>3] & (1<< (j & 7)))
-				{
-					// fix offset or flag it.
-					CommonLog("Offset at %x", dataCacheOffset + i*4096 + j*4);
-				}
-			}
-		}
-		
-		CommonLog("Slide covers %x entries (versus %lx of a range)", slide->toc_count,mapping[1].size);
-		PANIC("");
+		uint32_t extract_offs;
+		find_file(extractname, &extract_offs);
+		uintptr_t extract_buf = dyld_buf + extract_offs;
+		extract_file(extract_buf, outname);
 	}
-	*/
 	
 	
-	extract_file(extract_buf, outname);
 	//print_vmaddr(dyld_buf, dyld_n);
 	
 	
-#ifdef TARGET_IPHONE	
+#ifdef READ_VM	
 	vm_deallocate(mach_task_self(), (vm_address_t)mappingAddr, cacheAllocatedSize);
 #else
 	munmap((void*)dyld_buf, dyld_n);
 #endif
 	close(dyld_fd);
 	
-	CommonLog("Done!");
+//	CommonLog("Done!");
 //	PANIC("EOF: %x %s", dyld_n, dyld_name);
 }

@@ -238,6 +238,7 @@ void scan_export_tree(
 		
 		exported_node *node = (exported_node*) malloc(sizeof(exported_node));
 		memset(node, 0, sizeof(exported_node));
+		
 		memcpy(node->base, strbuf, strlen(strbuf)+1);
 		
 		node->flags = flags;
@@ -434,7 +435,7 @@ void export_construct_terminal(exported_node* node)
 void print_export_commands(const uintptr_t start, int len)
 {
 	CommonLog("Scanning... %d", len);
-	char strbuf[0x80];
+	char strbuf[0x200];
 	
 	scan_export_tree((uint8_t*) start, len, strbuf, print_export_commands_sub, NULL);
 
@@ -543,7 +544,7 @@ void export_add_node(exported_node** _basenode, exported_node* node)
 			{
 				// we are the node.  copy nterm, terminal over
 				tnode->nterm = node->nterm;
-				memcpy(tnode->terminal, node->terminal, 0x80);
+				memcpy(tnode->terminal, node->terminal, 0x200);
 				tnode = NULL;
 				node = NULL;
 			}
@@ -562,7 +563,7 @@ void export_add_node(exported_node** _basenode, exported_node* node)
 				tnode->child = cloned_node; // set the child
 				// now massage the child node
 			
-				memmove(cloned_node->base, &(cloned_node->base[j]), 0x80-j); // scoot over the string
+				memmove(cloned_node->base, &(cloned_node->base[j]), 0x200-j); // scoot over the string
 				cloned_node->sibling = node;
 				//CommonLog("%p added sibling %p", cloned_node, cloned_node->sibling);
 
@@ -575,7 +576,7 @@ void export_add_node(exported_node** _basenode, exported_node* node)
 			{
 				// we need the current node to be our child.  First, shorten up the strings
 				
-				memmove(tnode->base, &(tnode->base[j]), 0x80-j); // scoot over the string
+				memmove(tnode->base, &(tnode->base[j]), 0x200-j); // scoot over the string
 				
 				//swap via a temporary node
 				exported_node tmp_node;
@@ -608,14 +609,19 @@ void export_add_node(exported_node** _basenode, exported_node* node)
 	
 	if(node && symoff)
 	{
-		memmove(node->base, &(node->base[symoff]), 0x80-symoff); // scoot over the string
+	//	fprintf(stderr, "%s %x\n", node->base, (uint32_t) strlen(node->base));
+		memmove(node->base, &(node->base[symoff]), 0x200-symoff); // scoot over the string
 	}
 }
 
 
 int export_finalize(char* obuf, exported_node* basenode)
 {
-	
+	if(!basenode)
+	{
+		CommonLog("WARNING: No export trie!");
+		return 0;
+	}
 	if(basenode->base[0])
 	{
 		exported_node* node = basenode;
@@ -693,7 +699,7 @@ int compress_export_str(char* obuf, char* ibuf, int nif)
 			memset(node, 0, sizeof(exported_node));
 			
 			uint32_t ordinal;
-			char name_buf[0x80];
+			char name_buf[0x200];
 			sscanf(&ibuf[lastI], ".EXPORT_REEXPORT %x %s %s", &ordinal, node->base, name_buf);
 			
 			node->nterm = 0;

@@ -8,15 +8,20 @@ Compilation:
   Link your theos directory to ./theos
   Edit the makefile to determine native (OS X) vs iphone (iOS)
 
-Usage:
-  decache -c /path/to/cachecache -x <file to extract> [-o <out file name>]
-
+Usage examples:
+  To list all files in the cache
+    decache -c <cache>
+  To dump the entire cache
+    decache -c <cache> -o <output dir>
+  To dump just one file
+    decache -c <cache> -x <file to extract>
+    decache -c <cache> -x <file to extract> -o <output path + filename>
+  
 Notes:
-  A full listing of files can be determined via '-c /path/to/cache'
-  Wildcards and batch dumps are not supported.  However, decache does partial string matching (e.g. '-x UIKit')
+  Wildcards are not supported.  However, decache does partial string matching (e.g. '-x UIKit')
   Scrambled memory mapped caches suck.
     On iDevices, decache reads the entire cache into memory (eating your precious RAM) rather than using mmap.
-    On OS X, you need a non-scrambled cache.  Both scp and rsync return scrambled caches; use afc instead.
+    On OS X, you need a non-scrambled cache.  Use afc or figure out how to call F_GLOBAL_NOCACHE before using scp/rsync.
   Also, I do not add code signatures.  Sorry!
 
 
