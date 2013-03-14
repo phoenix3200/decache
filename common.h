@@ -14,6 +14,7 @@
 
 #include <mach/mach.h>
 
+#include <dlfcn.h>
 
 #define LC_SOURCE_VERSION 0x2A
 

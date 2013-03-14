@@ -4,7 +4,7 @@
 #include "reexport.h"
 
 #ifdef TARGET_IPHONE
-	#define READ_VM
+//	#define READ_VM
 #endif
 
 static inline int fsize(int fd)
@@ -107,6 +107,7 @@ struct dyld_cache_slide_info_entry {
 	uint8_t bits[4096/(8*4)];
 };
 
+uint32_t shared_cache_slide;
 uintptr_t dyld_buf;
 struct dyld_cache_header *dyldHead = NULL;
 uint64_t dyld_vmbase = 0;
@@ -140,7 +141,7 @@ uintptr_t locate_address(uint32_t addr, bool printSource = 0)
 			if(cmd == LC_SEGMENT)
 			{
 				segment_command* seg = (segment_command*) lcptr;
-				if(addr >= seg->vmaddr && addr < seg->vmaddr + seg->vmsize)
+				if(addr >= seg->vmaddr + shared_cache_slide && addr < seg->vmaddr + seg->vmsize + shared_cache_slide)
 				{
 					uintptr_t base = 0;
 					if(!strcmp(seg->segname, SEG_TEXT))
@@ -159,23 +160,38 @@ uintptr_t locate_address(uint32_t addr, bool printSource = 0)
 					{
 						const char *filename = (const char *)(dyld_buf + image_infos[i].pathFileOffset);
 						
-						CommonLog("Found at %s : %.16s", filename, seg->segname);
+						section *sect = (section *)((uintptr_t)seg + sizeof(segment_command));
+						for(uint32_t k = 0; k<seg->nsects; k++)
+						{
+							if(addr > sect[k].addr && addr < sect[k].addr + sect[k].size)
+							{
+							//	const char *offset = sect[k].offset+dylbuf+ (addr - sect[k].addr);
+								CommonLog("Found at %s : %.16s : %.16s", filename, seg->segname, sect[k].sectname);
+								
+							//	cout << filename << ": " << sect[k].segname <<"\t"<< sect[k].sectname << "\t";
+							//	return offset;
+							}
+						}
+						//CommonLog("Found at %s : %.16s", filename, seg->segname);
 					}
-					return base + addr - seg->vmaddr;
+					return base + addr - seg->vmaddr - shared_cache_slide;
 					
 				}
 				//print_segment(seg);
 			}
 			lcptr += ((load_command*) lcptr)->cmdsize;
 		}
-		
+	}
+	if(printSource)
+	{
+		CommonLog("Could not locate %x", addr);
 	}
 	return NULL;
 }
 
 static inline bool in_dyld_cache(uint32_t addr)
 {
-	return (addr >= dyld_vmbase) && (addr < dyld_vmextent);
+	return (addr >= dyld_vmbase + shared_cache_slide) && (addr < dyld_vmextent + shared_cache_slide);
 }
 
 const dyld_cache_image_info* find_file(const char* fname, uint32_t* offset)
@@ -429,11 +445,12 @@ bool seg_inoutput(uint32_t value, seg_adjust* adjust)
 	return false;
 }
 
-bool seg_virtresolve(uint32_t* value, seg_adjust* adjust)
+bool seg_virtresolve(uint32_t* value, seg_adjust* adjust, bool noslide = 0)
 {
-	if(*value >= adjust->old.vmaddr.start && *value < adjust->old.vmaddr.end)
+	if(*value >= adjust->old.vmaddr.start  + (noslide ? 0 : shared_cache_slide)
+	 && *value < adjust->old.vmaddr.end + (noslide ? 0 : shared_cache_slide))
 	{
-		*value += adjust->dvmaddr;
+		*value += adjust->dvmaddr - (noslide ? 0 : shared_cache_slide);
 		return true;
 	}
 	return false;
@@ -638,7 +655,7 @@ void text_dellvm(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* ds
 	memset(movt, 0, 16*sizeof(uintptr_t));
 	//memset(addpc, 0, 16*sizeof(uintptr_t));
 	
-	uintptr_t pcbase_old = -fbuf + 4 + tseg->old.vmaddr.start;
+	uintptr_t pcbase_old = -fbuf + 4 + tseg->old.vmaddr.start + shared_cache_slide;
 	uintptr_t pcbase_act = -fbuf + 4 + tseg->fix.vmaddr.start;
 	
 	for(uintptr_t data = start; data < end; data+=2)
@@ -761,7 +778,7 @@ void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 	uintptr_t start = fbuf + sect->offset;
 	uintptr_t end = start + sect->size;
 	
-	uintptr_t pcbase_old = -fbuf + 8 + tseg->old.vmaddr.start;
+	uintptr_t pcbase_old = -fbuf + 8 + tseg->old.vmaddr.start + shared_cache_slide;
 	uintptr_t pcbase_act = -fbuf + 8 + tseg->fix.vmaddr.start;
 	
 	
@@ -792,23 +809,37 @@ void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 			//CommonLog("old pointer %x", *tofix);
 			if(seg_virtresolve(tofix, dseg))
 			{
-				//CommonLog("pointer = %x", *tofix);
+				//	CommonLog("pointer = %x", *tofix);
 				lastfix = *tofix;
 				*tofix -= pcdata + pcbase_act;
 			}
 			else if(in_dyld_cache(*tofix))
 			{
+				//CommonLog("Dest = %x (from %x)", (uint32_t)pcdata, *tofix);
+
 				if(panicbit)
 				{
 				//	CommonLog("WARNING: Patching entry from context: %lx = %x", data - fbuf, *tofix);
 				
-				//	uintptr_t dest = locate_address(*tofix, 1);
+					//uintptr_t dest =
+					//locate_address(*tofix, 1);
 				}
 				lastfix += 4;
 				*tofix = lastfix;
-				//CommonLog("pointer = %x", *tofix);
+				
+				/*
+				if(panicbit)
+				{
+					CommonLog("whitening pointer = %x", *tofix);
+					*(uint32_t*) (fbuf + *tofix) = 0;
+				}
+				*/
 
 				*tofix -= pcdata + pcbase_act;
+				
+				
+				
+				//*(uint32_t*) data = 0;
 			}
 		}
 	}
@@ -954,7 +985,12 @@ void lazy_fix(uintptr_t fbuf, section* sect, section* stubs, seg_adjust* tseg, s
 				uint32_t goal = data - fbuf;
 				if(lazy_arr[index] != goal)
 				{
-					push_rebase_entry(rebase, (uintptr_t) &lazy_arr[index]);
+					//CommonLog("index = %x, goal = %x", lazy_arr[index], goal);
+					
+					//if(seg_virtresolve((uint32_t*)
+					{
+						push_rebase_entry(rebase, (uintptr_t) &lazy_arr[index]);
+					}
 					lazy_arr[index] = goal;
 				}
 			}
@@ -985,10 +1021,14 @@ void resolve_methnames(uintptr_t fbuf, section* sect, section* __objc_methname, 
 		}
 		
 		if(!in_dyld_cache(*pointer))// <  base_mapping)
+		{
+		//	PANIC("Could not resolve method in entire cache!");
 			continue;
+		}
 		
-		const char* str = (const char*) locate_address(pointers[i]);
+		const char* str = (const char*) locate_address(*pointer, 0); // BOOOO
 		int nStr = strlen(str);
+		//CommonLog("Str = %s", str);
 		if(str)
 		{
 			int j = 0;
@@ -1020,7 +1060,7 @@ void resolve_methnames(uintptr_t fbuf, section* sect, section* __objc_methname, 
 			}
 			else
 			{
-				PANIC("Failed to find method \'%s\'(%x, %x) at %lx", str, (uint32_t)((uintptr_t)str - (uintptr_t)dyld_buf), *pointer, (uintptr_t)pointer - fbuf);
+			 	PANIC("Failed to find method \'%s\'(%x, %x) at %x", str, (uint32_t)((uintptr_t)str - (uintptr_t)dyld_buf), *pointer, (uint32_t)((uintptr_t)pointer - fbuf) );
 				
 			}
 		}
@@ -1432,7 +1472,10 @@ void fix_from_classlist(uintptr_t fbuf, section* sect, section* __objc_methname,
 		class_t* meta = (class_t*) (fbuf + cls->isa);
 		
 		if(!seg_inoutput(classes[i], dseg))
-			PANIC("Error finding in correct spot!");
+		{
+			locate_address(classes[i], 1);
+			PANIC("Error finding in correct spot! %x %x", dseg->fix.offset.start, dseg->fix.offset.end);
+		}
 		if(!seg_inoutput(cls->isa, dseg))
 			PANIC("Error finding in correct spot!");
 
@@ -1696,16 +1739,22 @@ void hack_export_callback(exported_node* node, uintptr_t ctx)
 
 	if(node->flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER)
 	{
-		node->stub += context->tseg->old.vmaddr.start;
+		node->stub += context->tseg->old.vmaddr.start;// + shared_cache_slide;
 		if(!seg_virtresolve(&node->stub, context->tseg))
 		{
-			seg_virtresolve(&node->stub, context->dseg);
+			if(!seg_virtresolve(&node->stub, context->dseg))
+			{
+				CommonLog("Could not locate %x", node->stub);
+			}
 		}
 		
-		node->resolver += context->tseg->old.vmaddr.start;
+		node->resolver += context->tseg->old.vmaddr.start;// + shared_cache_slide;
 		if(!seg_virtresolve(&node->resolver, context->tseg))
 		{
-			seg_virtresolve(&node->resolver, context->dseg);
+			if(!seg_virtresolve(&node->stub, context->dseg))
+			{
+				CommonLog("Could not locate %x", node->stub);
+			}
 		}
 		
 	//	fprintf(stdout, ".EXPORT_RESOLVER %08x %08x %s\n", node->stub, node->resolver, node->base);
@@ -1722,7 +1771,7 @@ void hack_export_callback(exported_node* node, uintptr_t ctx)
 		
 	//	CommonLog("1node = %p child = %x", node, (uintptr_t)(node)->child);
 		
-		node->stub += context->tseg->old.vmaddr.start;
+		node->stub += context->tseg->old.vmaddr.start + shared_cache_slide;
 		if(!seg_virtresolve(&node->stub, context->dseg))
 		{	
 			if(!seg_virtresolve(&node->stub, context->tseg))
@@ -2019,7 +2068,7 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 		{
 		
 			tseg.old.vmaddr.start = text->vmaddr;
-			tseg.old.vmaddr.end = text->vmaddr + text->vmsize;
+			tseg.old.vmaddr.end = tseg.old.vmaddr.start + text->vmsize;
 			tseg.old.offset.start = text->fileoff;
 			tseg.old.offset.end = text->fileoff + text->filesize;
 			tseg.old.buf = xbuf;
@@ -2047,7 +2096,7 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 		if(data)
 		{
 			dseg.old.vmaddr.start = data->vmaddr;
-			dseg.old.vmaddr.end   = data->vmaddr + data->vmsize;
+			dseg.old.vmaddr.end   = dseg.old.vmaddr.start + data->vmsize;
 			dseg.old.offset.start = data->fileoff;
 			dseg.old.offset.end   = data->fileoff + data->filesize;
 			dseg.old.buf = dyld_buf + data->fileoff;
@@ -2211,9 +2260,11 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			{
 				"__objc_xtradata",
 				"__DATA",
-				dseg.old.vmaddr.end,
+				//dseg.old.vmaddr.end,
+				dseg.fix.vmaddr.end,
 				0,
-				dseg.old.offset.end,
+				//dseg.old.offset.end,
+				dseg.fix.offset.end,
 				2,
 				0,
 				0,
@@ -2317,7 +2368,8 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 									}*/
 									else
 									{
-										CommonLog("Not handling section of type %s (%.16s.%.16s)", section_types[type], sect->segname, sect->sectname);
+									
+									//	CommonLog("Not handling section of type %s (%.16s.%.16s)", section_types[type], sect->segname, sect->sectname);
 									}
 									break;
 								}
@@ -2330,7 +2382,8 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 									}
 									else
 									{
-										CommonLog("Not handling section of type %s (%.16s.%.16s)", section_types[type], sect->segname, sect->sectname);
+									
+									//	CommonLog("Not handling section of type %s (%.16s.%.16s)", section_types[type], sect->segname, sect->sectname);
 									}
 									break;
 								}
@@ -2357,7 +2410,8 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 									}
 									else
 									{
-										CommonLog("Not handling section of type %s (%.16s.%.16s)", section_types[type], sect->segname, sect->sectname);
+									
+									//	CommonLog("Not handling section of type %s (%.16s.%.16s)", section_types[type], sect->segname, sect->sectname);
 									}
 									break;
 										
@@ -2847,7 +2901,7 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 				{
 				//	CommonLog("%d %d", i, localSymbols->entriesCount);
 
-					if(localEntries[i].dylibOffset == tseg.old.vmaddr.start - dyld_vmbase)
+					if(localEntries[i].dylibOffset == tseg.old.vmaddr.start - dyld_vmbase) // + shared_cache_offset)
 					{
 						localEntry = &localEntries[i];
 						break;
@@ -2862,6 +2916,7 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			}
 		}
 		
+		//CommonLog("");
 		
 		sym->stroff = nfile;
 		for(int i=0; i<nsyms; i++)
@@ -2880,22 +2935,32 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			}
 			
 			{
-				uint32_t* nvalue = &nl[i].n_value;
+				// these were already resolved?? not good.
+				
+				uint32_t* nvalue = &nl[i].n_value;//; + shared_cache_slide;
 				if(*nvalue)
 				{
-					if(seg_virtresolve(nvalue, &dseg))
+					/*
+					if(!in_dyld_cache(*nvalue))
+					{
+						// *nvalue += shared_cache_slide;
+					}
+					*/
+					if(seg_virtresolve(nvalue, &dseg, 1))
 					{
 					//	PANIC("Missed virtresolve");
 					}
-					else if(seg_virtresolve(nvalue, &tseg))
+					else if(seg_virtresolve(nvalue, &tseg, 1))
 					{
 					//	PANIC("Missed virtresolve");
 					}
 					else
-					{}
+					{
+					//	PANIC("missed completely! :(");
+					}
 				}
 				
-			//	CommonLog("%p %s", nvalue, str);
+				//CommonLog("%x %s", *nvalue, str);
 			}
 					
 			
@@ -2987,6 +3052,25 @@ void Usage()
 	exit(1);
 }
 
+uint32_t htoi(const char *str)
+{
+	//	NSLine();
+	
+	uint32_t retval=0;
+	for(int i=0; i<8; i++)
+	{
+		char c=str[i];
+		if(c==0)
+			break;
+		c &=0x4F;
+		if(c&0x40)
+			c-=0x37;
+		retval = (retval << 4) + c;
+	}
+	return retval;
+}
+
+
 int main(int argc, char** argv)
 {
 	int ch;
@@ -2997,6 +3081,10 @@ int main(int argc, char** argv)
 	const char* extractname = NULL;//"MapKit";
 	
 	const char* outname = NULL;
+	
+//	uint32_t ptraddr = 0;
+//	uint32_t physaddr = 0;
+//	uint32_t scanval = 0;
 	
 	while((ch = getopt (argc, argv, "c:x:o:")) != -1)
 	{
@@ -3011,6 +3099,17 @@ int main(int argc, char** argv)
 			case 'o':
 				outname = optarg;
 				break;
+				/*
+			case 'p':
+				ptraddr = htoi(optarg);
+				break;
+			case 'a':
+				physaddr = htoi(optarg);
+				break;
+			case 's':
+				scanval = htoi(optarg);
+				break;
+				*/
 			default:
 				CommonLog("Argument %c = %s", ch, optarg);
 		}
@@ -3063,13 +3162,15 @@ int main(int argc, char** argv)
 
 	dyld_buf = (uintptr_t) mappingAddr;
 #else
-	// MAP_NOCACHE
+	// MAP_NOCACHE.  makes no flippin' difference :(
 	fcntl(dyld_fd, F_NOCACHE, 1);
 	
+//	fcntl(dyld_fd, F_GLOBAL_NOCACHE, 0);
 //	dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_ANON | MAP_NOCACHE, 0, 0);
 //	dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_SHARED, dyld_fd, 0);
+	
 	dyld_buf = (uintptr_t) mmap(NULL, dyld_n, PROT_READ, MAP_PRIVATE | MAP_NOCACHE, dyld_fd, 0);
-//	msync((void*)dyld_buf, dyld_n, MS_SYNC | MS_INVALIDATE);
+//	msync((void*)dyld_buf, dyld_n, MS_SYNC | MS_INVALIDATE | MS_KILLPAGES);
 #endif
 		   
 	
@@ -3087,9 +3188,21 @@ int main(int argc, char** argv)
 			{
 				dyld_vmextent = mapping[i].address + mapping[i].size;
 			}
+		//	CommonLog("(%x) %x -> %x", (uint32_t) mapping[i].fileOffset, (uint32_t) mapping[i].address, (uint32_t) (mapping[i].address + mapping[i].size));
 		}
 		
 	}
+	
+	#ifdef TARGET_IPHONE
+	uint64_t start_address;
+	syscall(294, &start_address);
+	shared_cache_slide = start_address - dyld_vmbase;
+	
+	//CommonLog("Slide = %x", shared_cache_slide);
+	//exit(1);
+	#else
+	shared_cache_slide = 0;
+	#endif
 	
 	
 	//PANIC("imageOffset %x count %x", dyldHead->imagesOffset, dyldHead->imagesCount);
@@ -3097,6 +3210,36 @@ int main(int argc, char** argv)
 	image_infos = (dyld_cache_image_info*) (dyld_buf + dyldHead->imagesOffset);
 	localSymbols = (dyld_cache_local_symbols_info*) (dyld_buf + dyldHead->localSymbolsOffset);
 	
+	/*
+	if(scanval)
+	{
+		for(uintptr_t ptr = dyld_buf; ptr < dyld_buf + dyld_n; ptr +=4)
+		{
+			if(*(uint32_t*)ptr==scanval)
+			{
+				CommonLog("Found at %x", (uint32_t) (ptr - dyld_buf));
+			//	exit(1);
+			}
+		}
+		exit(1);
+	}
+	if(physaddr)
+	{
+		CommonLog("Value is %x", *(uint32_t*) ((uintptr_t) dyld_buf + physaddr));
+		exit(1);
+	}
+	if(ptraddr)
+	{
+		if(ptraddr == locate_address(ptraddr, 1))
+		{
+			
+		}
+		exit(1);
+	}
+	*/
+	
+	//CommonLog("ptraddr = %x", ptraddr);
+	//exit(1);
 	if(!extractname)
 	{
 		char outpath[0x80];

@@ -2,7 +2,7 @@ Decache
 
 -----
 
-Decache is a simple utility to extract working and completely valid files from an iOS dyld shared cache.
+Decache extracts working and completely valid files from an iOS dyld shared cache.
 
 Compilation:
   Link your theos directory to ./theos
@@ -19,9 +19,5 @@ Usage examples:
   
 Notes:
   Wildcards are not supported.  However, decache does partial string matching (e.g. '-x UIKit')
-  Scrambled memory mapped caches suck.
-    On iDevices, decache reads the entire cache into memory (eating your precious RAM) rather than using mmap.
-    On OS X, you need a non-scrambled cache.  Use afc or figure out how to call F_GLOBAL_NOCACHE before using scp/rsync.
-  Also, I do not add code signatures.  Sorry!
-
-
+  Do not use scp/rsync to download your cache from your device.  Use afc.  Or figure out how to use F_GLOBAL_NOCACHE.
+  I do not add code signatures.

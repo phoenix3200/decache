@@ -17,7 +17,7 @@ decache:
 
 compare:
 	@echo "Making compare..."
-	@$(CC) -O3 compare.c -o compare -ggdb $(LFLAGS)
+	@$(CC) -O3 compare.mm -o compare -ggdb $(LFLAGS)
 
 
 
