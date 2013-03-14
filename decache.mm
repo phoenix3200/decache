@@ -3195,7 +3195,7 @@ int main(int argc, char** argv)
 	
 	#ifdef TARGET_IPHONE
 	uint64_t start_address;
-	syscall(294, &start_address);
+	syscall(SYS_shared_region_check_np, &start_address); // 294
 	shared_cache_slide = start_address - dyld_vmbase;
 	
 	//CommonLog("Slide = %x", shared_cache_slide);

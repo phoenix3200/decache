@@ -8,8 +8,8 @@ decache_OBJCC_FILES = \
     reexport.mm
 
 # SDKVERSION = 3.0
-TARGET = native
-# TARGET = iphone
+# TARGET = native
+TARGET = iphone
 
 include theos/makefiles/common.mk
 include theos/makefiles/tool.mk

@@ -16,6 +16,8 @@
 
 #include <dlfcn.h>
 
+#include <sys/syscall.h>
+
 #define LC_SOURCE_VERSION 0x2A
 
 #ifndef EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER
