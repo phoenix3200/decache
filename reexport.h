@@ -26,6 +26,8 @@ struct exported_node
 
 uint32_t append_uleb(char* p, uint32_t val);
 
+uintptr_t read_uleb128(const uint8_t*& p, const uint8_t* end);
+
 
 void scan_export_tree(
 		const uint8_t *start, int len, char* strbuf,

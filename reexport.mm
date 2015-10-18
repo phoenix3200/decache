@@ -89,7 +89,7 @@ uint32_t append_sleb(char* p, int32_t val)
 }
 
 
-static uintptr_t read_uleb128(const uint8_t*& p, const uint8_t* end)
+uintptr_t read_uleb128(const uint8_t*& p, const uint8_t* end)
 {
 	uint64_t result = 0;
 	int		 bit = 0;

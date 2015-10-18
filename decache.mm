@@ -21,7 +21,7 @@ static inline int fsize(int fd)
 
 
 /*
-	0x0BEAE000	// codesign table offset
+	0x0BEAE000	// codesign table offset__
 	0x0
 	0x0
 	0x0
@@ -107,6 +107,12 @@ struct dyld_cache_slide_info_entry {
 	uint8_t bits[4096/(8*4)];
 };
 
+
+#define SEG_DATA_CONST "__DATA_CONST\0\0\0\0"
+#define SEG_DATA_DIRTY "__DATA_DIRTY\0\0\0\0"
+
+
+
 uint32_t shared_cache_slide;
 uintptr_t dyld_buf;
 struct dyld_cache_header *dyldHead = NULL;
@@ -116,7 +122,7 @@ dyld_cache_image_info* image_infos = NULL;
 dyld_cache_local_symbols_info *localSymbols = NULL;
 
 
-uintptr_t locate_address(uint32_t addr, bool printSource = 0)
+uintptr_t locate_address(uint32_t addr, bool printSource = 0, uintptr_t* xbuf_ret = 0)
 {
 	for(uint32_t i=0; i< dyldHead->imagesCount; i++)
 	{
@@ -144,11 +150,12 @@ uintptr_t locate_address(uint32_t addr, bool printSource = 0)
 				if(addr >= seg->vmaddr + shared_cache_slide && addr < seg->vmaddr + seg->vmsize + shared_cache_slide)
 				{
 					uintptr_t base = 0;
-					if(!strcmp(seg->segname, SEG_TEXT))
+					if(!strncmp(seg->segname, SEG_TEXT, 16))
 					{
 						base = xbuf;
 					}
-					else if(!strcmp(seg->segname, SEG_DATA) || !strcmp(seg->segname, SEG_LINKEDIT))
+					else if(!strncmp(seg->segname, SEG_DATA, 16) || !strncmp(seg->segname, SEG_LINKEDIT, 16)
+						 || !strncmp(seg->segname, SEG_DATA_CONST, 16) || !strncmp(seg->segname, SEG_DATA_DIRTY, 16))
 					{
 						base = dyld_buf + seg->fileoff;
 					}
@@ -166,7 +173,7 @@ uintptr_t locate_address(uint32_t addr, bool printSource = 0)
 							if(addr > sect[k].addr && addr < sect[k].addr + sect[k].size)
 							{
 							//	const char *offset = sect[k].offset+dylbuf+ (addr - sect[k].addr);
-								CommonLog("Found at %s : %.16s : %.16s", filename, seg->segname, sect[k].sectname);
+								CommonLog("Found at %s : %.16s : %.16s (+%08x)", filename, seg->segname, sect[k].sectname, addr-seg->vmaddr);
 								
 							//	cout << filename << ": " << sect[k].segname <<"\t"<< sect[k].sectname << "\t";
 							//	return offset;
@@ -174,6 +181,8 @@ uintptr_t locate_address(uint32_t addr, bool printSource = 0)
 						}
 						//CommonLog("Found at %s : %.16s", filename, seg->segname);
 					}
+					if(xbuf_ret)
+						*xbuf_ret = xbuf;
 					return base + addr - seg->vmaddr - shared_cache_slide;
 					
 				}
@@ -188,6 +197,67 @@ uintptr_t locate_address(uint32_t addr, bool printSource = 0)
 	}
 	return NULL;
 }
+
+segment_command* find_segment(uintptr_t fbuf, const char* name)
+{
+	mach_header* header = (mach_header*) fbuf;
+	
+	uint32_t ncmds = header->ncmds;
+	//uint32_t sizeofcmds = header->sizeofcmds;
+	uintptr_t cmd_base = fbuf + sizeof(mach_header);
+	
+	
+	// first scan: make sure we have space
+	{
+		//uint32_t lowestOffset;
+		
+		uintptr_t lcptr = cmd_base;
+		for(uint32_t i=0; i<ncmds; i++)
+		{
+			uint32_t cmd = ((load_command*) lcptr)->cmd;
+		
+			if(cmd == LC_SEGMENT)
+			{
+				segment_command* seg = (segment_command*) lcptr;
+				if(!strncmp(seg->segname, name, 16))
+					return seg;
+			}
+			lcptr += ((load_command*) lcptr)->cmdsize;
+			
+		}
+	}
+	return NULL;
+}
+
+load_command* find_command(uintptr_t fbuf, uint32_t matching_cmd)
+{
+	mach_header* header = (mach_header*) fbuf;
+	
+	uint32_t ncmds = header->ncmds;
+	//uint32_t sizeofcmds = header->sizeofcmds;
+	uintptr_t cmd_base = fbuf + sizeof(mach_header);
+	
+	
+	// first scan: make sure we have space
+	{
+		//uint32_t lowestOffset;
+		
+		uintptr_t lcptr = cmd_base;
+		for(uint32_t i=0; i<ncmds; i++)
+		{
+			uint32_t cmd = ((load_command*) lcptr)->cmd;
+		
+			if(cmd == matching_cmd)
+			{
+				return (load_command*)lcptr;
+			}
+			lcptr += ((load_command*) lcptr)->cmdsize;
+			
+		}
+	}
+	return NULL;
+}
+
 
 static inline bool in_dyld_cache(uint32_t addr)
 {
@@ -425,12 +495,20 @@ void seg_applyoffset(segment_command* seg, seg_adjust* adjust)
 	uint32_t dvmaddr = adjust->dvmaddr;
 	uint32_t doffset = adjust->doffset;
 //	CommonLog("Adjust: %x %x", dvmaddr, doffset);
+	
+//	CommonLog("old vmaddr/offset: %x %x", seg->vmaddr, seg->fileoff);
+
 	seg->vmaddr += dvmaddr;
-	seg->fileoff += doffset;
+	if(seg->fileoff)
+		seg->fileoff += doffset;
+	
+//	CommonLog("new vmaddr/offset: %x %x", seg->vmaddr, seg->fileoff);
 	int nsects = seg->nsects;
 	section* sects = (section*) ((uintptr_t) seg + sizeof(segment_command));
 	for(int i=0; i<nsects; i++)
 	{
+//		CommonLog("Old offset: %x %x", sects[i].addr, sects[i].offset);
+
 		sects[i].addr += dvmaddr;
 		if(sects[i].offset)
 			sects[i].offset += doffset;
@@ -438,20 +516,38 @@ void seg_applyoffset(segment_command* seg, seg_adjust* adjust)
 	}	
 }
 
-bool seg_inoutput(uint32_t value, seg_adjust* adjust)
+
+bool seg_inoutputs(uint32_t value, seg_adjust* adjust, int nAdjust)
 {
-	if(value >= adjust->fix.offset.start && value < adjust->fix.offset.end)
-		return true;
+	for(int i=0; i<nAdjust; i++)
+	{
+		if(value >= adjust[i].fix.offset.start && value < adjust[i].fix.offset.end)
+			return true;
+	}
 	return false;
 }
 
-bool seg_virtresolve(uint32_t* value, seg_adjust* adjust, bool noslide = 0)
+/*
+bool seg_inoutput(uint32_t value, seg_adjust* adjust)
 {
-	if(*value >= adjust->old.vmaddr.start  + (noslide ? 0 : shared_cache_slide)
-	 && *value < adjust->old.vmaddr.end + (noslide ? 0 : shared_cache_slide))
+//	if(value >= adjust->fix.offset.start && value < adjust->fix.offset.end)
+//		return true;
+//	return false;
+	return seg_inoutputs(value, adjust, 1);
+}*/
+
+
+
+bool seg_virtresolves(uint32_t* value, seg_adjust* adjust, int nAdjust, bool noslide = 0)
+{
+	for(int i=0; i<nAdjust; i++)
 	{
-		*value += adjust->dvmaddr - (noslide ? 0 : shared_cache_slide);
-		return true;
+		if(*value >= adjust[i].old.vmaddr.start  + (noslide ? 0 : shared_cache_slide)
+		 && *value < adjust[i].old.vmaddr.end + (noslide ? 0 : shared_cache_slide))
+		{
+			*value += adjust[i].dvmaddr - (noslide ? 0 : shared_cache_slide);
+			return true;
+		}
 	}
 	return false;
 }
@@ -546,7 +642,7 @@ void push_rebase_entry(rebase_info* rebase, uintptr_t entry)
 	}
 	else if(rebase->currptr - rebase->buf > rebase->nBuf - 0x10)
 	{
-		int nBuf_new = rebase->nBuf + 0x80000; // + 32k
+		int nBuf_new = rebase->nBuf + 0x8000; // + 32k
 		uintptr_t newbuf = (uintptr_t) malloc(nBuf_new);
 		memcpy((void*) newbuf, (void*)rebase->buf, rebase->nBuf);
 		rebase->nBuf = nBuf_new;
@@ -640,8 +736,330 @@ bool seg_fileresolve(uint32_t* value, seg_adjust* adjust)
 }
 */
 
-void text_dellvm(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dseg)
+
+void text_fixlongcalls(uintptr_t fbuf, section* text, section* pss, section* lsp, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs)
 {
+//	CommonLog("fixlongcalls: %8s %08x %08x", text->sectname, text->offset, text->size);
+//	CommonLog("fixlongcalls: %8s %08x %08x", pss->sectname, pss->offset, pss->size);
+	
+	
+	
+	
+	/*
+	CommonLog("fixlongcalls: %8s %08x %08x", sth->sectname, sth->offset, sth->size);
+	
+	int nsth = 0;
+	
+	uint32_t sths[sth->size / 12];
+	
+	
+	uintptr_t stbase = fbuf + sth->offset;
+
+	for(int i=0; i<sth->size / 4; i++)
+	{
+		// LDR R12, (PC+0)
+		if(*(uint32_t*)(stbase + i*4) == 0xe59fc000)
+		{
+			// B PC-...
+			uint32_t jmpz = ((-(i+3)) & 0xFFFFFF) | (0xea << 24);
+			if(*(uint32_t*)(stbase + (i+1)*4) == jmpz)
+			{
+			//	CommonLog("%x", sth->offset + i*4);
+				sths[nsth] = sth->offset + i*4;
+				nsth++;
+				//exit(1);
+			}
+			else
+			{
+				CommonLog("%x %x", i, *(uint32_t*)(stbase + (i+1)*4));
+				exit(1);
+			}
+			
+			// ea ff ff f1
+			
+		}
+	}
+	*/
+	//CommonLog("Found %d stub helpers\n", nsth);
+	//exit(1);
+	
+	
+	
+	
+	// identify all the dest addresses for the pss
+	int npss = pss->size / 16;
+	
+	uintptr_t psbase = fbuf + pss->offset;
+	uintptr_t psvm = tseg->old.vmaddr.start + pss->addr;
+	
+	uint32_t ptrs[npss];
+	for(int i=0; i<npss; i++)
+	{
+		// this is the easiest match
+		if(  *(uint32_t*)(psbase + i*16 + 12) == 0xE7FFDEFE)
+		{
+			uint32_t offs = *(uint32_t*)(psbase + i*16 + 8);
+			
+			offs += pss->addr + i*16 + 12;
+			//CommonLog("pointer to %x", offs);
+			ptrs[i]=offs + tseg->old.vmaddr.start;
+			//*(uint32_t*)(psbase + i*16 + 12) =0;
+		}
+		else
+		{
+			uint32_t offs = *(uint32_t*)(psbase + i*16 + 12);
+			
+			offs += pss->addr + i*16 + 12;
+			
+			offs += tseg->old.vmaddr.start;
+			
+			if(seg_virtresolves(&offs, tseg, 1))
+			{
+			//	CommonLog("pointer to %x (%x)", offs, *(uint32_t*)(fbuf + offs));
+				
+			}
+			else if(seg_virtresolves(&offs, dsegs, ndsegs))
+			{
+			//	CommonLog("pointer to %x (%x)", offs, *(uint32_t*)(fbuf + offs));
+				
+				offs -= (pss->addr + i*16 + 12);
+				*(uint32_t*)(psbase + i*16 + 12) = offs;
+			}
+			else
+			{
+				exit(1);
+			}
+		}
+		
+		
+		// rewrite pss
+			
+		*(uint32_t*)(psbase + i*16 + 0) = 0xE59FC004;
+		*(uint32_t*)(psbase + i*16 + 4) = 0xE08FC00C;
+		*(uint32_t*)(psbase + i*16 + 8) = 0xE59CF000;
+		*(uint32_t*)(psbase + i*16 + 12) = lsp->addr + i*4-(pss->addr + i*16 + 12);
+		
+	}
+		
+	
+	
+	
+	
+	// 01 F0 EA 32
+	// EA32F010
+	
+	
+	uintptr_t start = fbuf + text->offset;
+	uintptr_t end = start + text->size;
+	
+	uintptr_t pcbase_old = -fbuf + 4 + tseg->old.vmaddr.start + shared_cache_slide;
+	uintptr_t pcbase_act = -fbuf + 4 + tseg->fix.vmaddr.start;
+	
+	for(uintptr_t data = start; data < end; data+=2)
+	{
+		uint16_t op = *(uint16_t*)data;
+		
+		// F64C30DA
+		// F6C010CC
+		
+		
+		if((op & 0xF800) > 0xE7FF)
+		{
+			
+			
+			
+			// THUMB32
+			uint32_t op32 = (op << 16) | *(uint16_t*)(data+2);
+			
+			// bl, blx (bit 12?).  Should have no BLX's, but just in case...
+			if((op32 & 0xF800E800) == 0xF000E800)
+			{
+				// we already did + 2 here...hence +4 from base
+				int delta = ((op32 & 0x7FF0000) >> 4) | ((op32 & 0x7FF) << 1) + 4;
+				
+				if(delta & (1<<22))
+				{
+					delta |= 0xFF800000;
+				}
+				 // 0x24F48
+				
+				//if(delta + data-fbuf >= start && delta + data < end)
+				//	continue;
+				uint32_t addr = tseg->old.vmaddr.start + delta + (data-fbuf);
+				
+				if((op32 & 0x1000)==0)
+				{
+					addr &= ~0x3;
+					delta = addr - tseg->old.vmaddr.start - (data-fbuf);
+				}
+				
+				if(addr >= tseg->old.vmaddr.start && addr < tseg->old.vmaddr.end)
+					continue;
+				
+				//CommonLog("Found BL(X)! %08x (%08x)", addr - tseg->old.vmaddr.start, data-fbuf);
+				//CommonLog("Looking for addr... %x", addr);
+				
+				// 22661 28e0
+				// 24f48
+				// 
+				
+				//locate_address(addr, 0);
+				
+				
+				int i;
+				{
+					for(i=0; i<npss; i++)
+					{
+						if(ptrs[i] && (ptrs[i] & (~1)) == addr)
+						{
+							uint32_t dest = pss->offset + i*16 - (data-fbuf) -4;
+							
+							*(uint16_t*)(data) = 0xF000 | ((dest & 0x7FF000) >> 12);
+							*(uint16_t*)(data+2) = 0xE800 | ((dest & 0xFFE) >> 1);
+							
+							//CommonLog("hit on entry %d.  patching to +%08x... (%08x)\n", i, dest, (*(uint16_t*)data << 16) |  *(uint16_t*) (data+2));
+							
+							// BLX +dest to the stub
+							break;
+						}
+					}
+					if(i==npss)
+					{
+						
+						//if((data - fbuf) == 0x125e)
+						//{
+							//PANIC("addr = %08x %08x %08x", delta + (data-fbuf), delta, data-fbuf);
+						//}
+						
+						
+						const char* matching_str = 0;
+						{
+							uintptr_t xbuf;
+							locate_address(addr, 0, &xbuf);
+							
+							
+							symtab_command* sym = (symtab_command*) find_command(xbuf, LC_SYMTAB);
+							dysymtab_command* dsym = (dysymtab_command*) find_command(xbuf, LC_DYSYMTAB);
+							
+							
+							int nsyms = sym->nsyms;
+							struct nlist* nl = (struct nlist*) (dyld_buf + sym->symoff);
+							const char* strs = (const char*) (dyld_buf + sym->stroff);
+												
+							for(int j=dsym->iextdefsym; j < dsym->iextdefsym + dsym->nextdefsym; j++)
+							{
+								const char* str = &strs[ nl[j].n_un.n_strx];
+								uint32_t v = nl[j].n_value;
+								if(v == addr)
+								{
+									matching_str = str;
+								//	CommonLog("p=%08lx v=%08x, str=%s", data-fbuf, nl[j].n_value, str);
+									break;
+								}
+							}
+						}
+						
+						//if((data - fbuf) == 0x125e)
+						//{
+						//	PANIC("addr = %s", matching_str);
+						//}
+						
+						
+						{
+							symtab_command* sym = (symtab_command*) find_command(fbuf, LC_SYMTAB);
+							dysymtab_command* dsym = (dysymtab_command*) find_command(fbuf, LC_DYSYMTAB);
+							
+							//S_SYMBOL_STUBS							
+							
+							int nsyms = sym->nsyms;
+							uintptr_t dsymoff = (uintptr_t)(dyld_buf + dsym->indirectsymoff);
+							
+							/*
+							CommonLog("indirectsymoff = %08x", dsym->indirectsymoff);
+							for(int j=0; j<512; j++)
+							{
+								fprintf(stderr, "%02x", *(uint8_t*)(dsymoff+j));
+								if(((j+1)&7) == 0)
+									if(((j+1)&31) == 0)
+										fprintf(stderr, "\n");
+									else
+										fprintf(stderr, " ");
+							}
+							*/
+							struct nlist* nl = (struct nlist*) (dyld_buf + sym->symoff);//sym->symoff);
+							const char* strs = (const char*) (dyld_buf + sym->stroff);
+							
+							//dyld_buf + 
+							
+							int k;
+							for(k=0; k < dsym->nindirectsyms; k++)
+							{
+								int j = *(uint32_t*)(dsymoff+k*4);
+								if(j & 0xC0000000)
+									continue;
+								//CommonLog("j=%x", j);
+								uint32_t v = nl[j].n_value;
+								const char* str = &strs[ nl[j].n_un.n_strx];
+								//const char* str = &strs[v];
+								//
+								
+								if(str == matching_str)
+								{
+								//	matching_str = str;
+								//	CommonLog("%d %x %s (%x)", j, v, str, k);
+									break;
+								}
+							}
+							if(k < dsym->nindirectsyms)
+							{
+								uint32_t dest = pss->offset + k*16 - (data-fbuf) -4;
+								
+								*(uint16_t*)(data) = 0xF000 | ((dest & 0x7FF000) >> 12);
+								*(uint16_t*)(data+2) = 0xE800 | ((dest & 0xFFE) >> 1);
+								
+							}
+							else
+							{
+								// this got triggered by two double instructions back-to-back!  lol!
+								//PANIC("addr = %08x %08x %08x", delta + (data-fbuf), delta, data-fbuf);
+							}
+							
+						}
+						//exit(1);
+						
+						//segment_command* find_segment(uintptr_t fbuf, const char* name)
+						//load_command* find_command(uintptr_t fbuf, uint32_t matching_cmd)
+						
+						//find_file(extractname, &extract_offs, &xbuf);
+						
+						
+						//uintptr_t extract_buf = dyld_buf + extract_offs;
+						//PANIC("Unresolved jump!");
+					}
+				}
+
+				//exit(1);
+			}
+			
+		}
+	}
+}
+
+void text_dellvm(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs)
+{
+//	CommonLog("dellvm: %8s %p %08x %08x", sect->sectname, sect-fbuf, sect->offset, sect->size);
+	
+	
+	
+	// thumb
+	// 0x149e + 4
+	// d3 f7 41 fb
+	// BL              0xFFFD4B24
+	// f7d3 fb41  BL SX(23'h7D3682)
+	//7d3 << 12 FFFD3682
+	//341 << 1  FFFD3682
+	
+	
 	uintptr_t start = fbuf + sect->offset;
 	uintptr_t end = start + sect->size;
 	
@@ -692,8 +1110,6 @@ void text_dellvm(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* ds
 		}
 		else
 		{
-			// THUMB16
-			// add rX pc;
 			if((op & 0xFF78) == 0x4478)
 			{
 				int rX = op & 0x7 | ((op & 0x80) ? 0x8 : 0);
@@ -729,7 +1145,7 @@ void text_dellvm(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* ds
 				
 				ptr+= pcorig;
 				
-				if(seg_virtresolve(&ptr, dseg))
+				if(seg_virtresolves(&ptr, dsegs, ndsegs))
 				{
 					ptr -= pcact;
 				//	CommonLog("Adjusted to %x", ptr - pcact);
@@ -759,9 +1175,13 @@ void text_dellvm(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* ds
 				//	PANIC("Patching to %x, %x", lop, hop);
 				//	CommonLog("Patching %x to %x, %x to %x", lptr +
 				}
+				else if(seg_virtresolves(&ptr, tseg, 1))
+				{
+					
+				}
 				else
 				{
-				//	PANIC("pc = %x,%x data = %x", pcorig, pcact, ptr);
+					PANIC("pc = %x,%x data = %x", pcorig, pcact, ptr);
 				}
 				//PANIC("Done.");
 				//return;
@@ -773,7 +1193,7 @@ void text_dellvm(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* ds
 }
 
 
-void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dseg, bool panicbit)
+void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs, bool panicbit)
 {
 	uintptr_t start = fbuf + sect->offset;
 	uintptr_t end = start + sect->size;
@@ -784,19 +1204,45 @@ void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 	
 	uint32_t lastfix = -4;
 	
+	
+	// __picsymbolstub4 289c
+	// __la_symbol_ptr 3180
+	
+	
 	for(uintptr_t data = start; data < end; data+=4)
 	{
+		// e59fc000
+		
+		// LDR R12, =(PC+offset)
 		uint32_t op = *(uint32_t*) data;
 		if((op & 0xFFFFFF00) == 0xE59FC000)
 		{
-			uint32_t offs = op & 0xFF;
+			//CommonLog("Test!");
+			uint32_t offs = op & 0xFFF;
 			
 			uint32_t* tofix = (uint32_t*) (data + 8 + offs);
 			
 			//uint32_t old = *tofix;
 			
 			uintptr_t pcdata = data + 4;
+			//CommonLog("%08x %016lx", *(uint32_t*)pcdata, data-fbuf);
 			{
+				// E08FC00C // ADD R12, PC, R12 (??)
+				// E08FF00C // ADD PC, PC, R12
+				// E7FFDEFE
+				/*
+				__picsymbolstub4:00009E20 _objc_msgSend                           ; CODE XREF: -[UILabel(WeatherAdditions) setFrameOnBaseline:]+1Ep
+				__picsymbolstub4:00009E20                                         ; -[UILabel(WeatherAdditions) setFrameOnBaseline:]+56p ...
+				__picsymbolstub4:00009E20                 LDR             R12, =(dword_9E2C - 0x9E2C)
+				__picsymbolstub4:00009E24                 ADD             PC, PC, R12 ; dword_9E2C
+				__picsymbolstub4:00009E24 ; End of function _objc_msgSend
+				__picsymbolstub4:00009E24
+				__picsymbolstub4:00009E24 ; ---------------------------------------------------------------------------
+				__picsymbolstub4:00009E28 off_9E28        DCD dword_9E2C - 0x9E2C ; DATA XREF: _objc_msgSendr
+				__picsymbolstub4:00009E2C dword_9E2C      DCD 0xE7FFDEFE          ; DATA XREF: _objc_msgSend+4o
+				__picsymbolstub4:00009E2C                                         ; __picsymbolstub4:off_9E28o
+				*/
+				
 				int i = 0;
 				for(; i<10 && *(uint32_t*)pcdata != 0xE08FC00C; i++, pcdata+=4)
 				{}
@@ -806,8 +1252,9 @@ void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 			
 			
 			*tofix += pcdata + pcbase_old;
+			
 			//CommonLog("old pointer %x", *tofix);
-			if(seg_virtresolve(tofix, dseg))
+			if(seg_virtresolves(tofix, dsegs, ndsegs))
 			{
 				//	CommonLog("pointer = %x", *tofix);
 				lastfix = *tofix;
@@ -815,6 +1262,8 @@ void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 			}
 			else if(in_dyld_cache(*tofix))
 			{
+				locate_address(*tofix, 1);
+				//
 				//CommonLog("Dest = %x (from %x)", (uint32_t)pcdata, *tofix);
 
 				if(panicbit)
@@ -835,11 +1284,23 @@ void stub32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 				}
 				*/
 
-				*tofix -= pcdata + pcbase_act;
+				//*tofix = 0;
+				if(panicbit) // ????
+				{
+					*tofix = 0;
+				}
+				else
+				{
+					*tofix -= pcdata + pcbase_act;
+				}
 				
 				
 				
 				//*(uint32_t*) data = 0;
+			}
+			else
+			{
+				PANIC("HALP!!");
 			}
 		}
 	}
@@ -873,7 +1334,7 @@ void abs32_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dseg
 }*/
 
 
-void extz_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dseg)
+void extz_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs)
 {
 	// this function *WILL* panic if it finds a local offset
 	
@@ -882,11 +1343,11 @@ void extz_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dseg)
 	
 	for(uintptr_t data = start; data < end; data+=4)
 	{
-		if(seg_virtresolve((uint32_t*) data, tseg))
+		if(seg_virtresolves((uint32_t*) data, tseg, 1))
 		{
 			PANIC("Missed automatic fix at %lx", data - fbuf);
 		}
-		else if(seg_virtresolve((uint32_t*) data, dseg))
+		else if(seg_virtresolves((uint32_t*) data, dsegs, ndsegs))
 		{
 			PANIC("Missed automatic fix at %lx", data - fbuf);
 		}
@@ -898,7 +1359,7 @@ void extz_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dseg)
 }
 
 
-void rebasez_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dseg, rebase_info* rebase)
+void rebasez_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs, rebase_info* rebase)
 {
 	// this function *WILL* panic if it finds a local offset
 	
@@ -907,11 +1368,11 @@ void rebasez_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* ds
 	
 	for(uintptr_t data = start; data < end; data+=4)
 	{
-		if(seg_virtresolve((uint32_t*) data, tseg))
+		if(seg_virtresolves((uint32_t*) data, tseg, 1))
 		{
 			push_rebase_entry(rebase, data);
 		}
-		else if(seg_virtresolve((uint32_t*) data, dseg))
+		else if(seg_virtresolves((uint32_t*) data, dsegs, ndsegs))
 		{
 			push_rebase_entry(rebase, data);
 		}
@@ -966,7 +1427,8 @@ void abs32z_fix(uintptr_t fbuf, section* sect, seg_adjust* tseg, seg_adjust* dse
 }
 */
 
-void lazy_fix(uintptr_t fbuf, section* sect, section* stubs, seg_adjust* tseg, seg_adjust* dseg, rebase_info* rebase)
+// seg_adjust* tseg, seg_adjust* dsegs, int ndsegs, 
+void lazy_fix(uintptr_t fbuf, section* sect, section* stubs, rebase_info* rebase)
 {
 	uint32_t *lazy_arr = (uint32_t*) (fbuf + sect->offset);
 	//int nlazy = sect->size / sizeof(uint32_t);
@@ -1011,7 +1473,7 @@ void resolve_methnames(uintptr_t fbuf, section* sect, section* __objc_methname, 
 	{
 		uint32_t* pointer = &pointers[i];
 		
-		if(seg_virtresolve((uint32_t*) pointer, tseg))
+		if(seg_virtresolves((uint32_t*) pointer, tseg, 1))
 		{
 		//	uint32_t tbl = sect->offset(
 			
@@ -1077,7 +1539,7 @@ void resolve_methname(uintptr_t fbuf, uint32_t* pointer, section* __objc_methnam
 	const char* methods = (const char*) (fbuf + __objc_methname->offset);
 	int nMethods = __objc_methname->size;
 	
-	if(seg_virtresolve(pointer, tseg))
+	if(seg_virtresolves(pointer, tseg, 1))
 	{
 		if(!noPanic)
 		{
@@ -1185,7 +1647,7 @@ struct property_t {
 
 
 
-void fix_methods(uintptr_t fbuf, list_t* head, section* __objc_methname, seg_adjust* tseg, seg_adjust* dseg, rebase_info* rebase, bool nowarn = 0)
+void fix_methods(uintptr_t fbuf, list_t* head, section* __objc_methname, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs, rebase_info* rebase, bool nowarn = 0)
 {
 //	CommonLog("Fixing method");
 	int n = head->count;
@@ -1195,14 +1657,14 @@ void fix_methods(uintptr_t fbuf, list_t* head, section* __objc_methname, seg_adj
 	//method_t static_method;
 	
 	resolve_methname(fbuf, &methods[0].name, __objc_methname, tseg, rebase, nowarn);
-	if(seg_virtresolve(&methods[0].types, tseg))
+	if(seg_virtresolves(&methods[0].types, tseg, 1))
 	{
 		if(!nowarn)
 			PANIC("Missed automatic fix at %lx", (uintptr_t) &methods[0].types - fbuf);
 		push_rebase_entry(rebase, (uintptr_t) &methods[0].types);
 
 	}
-	if(seg_virtresolve(&methods[0].imp, tseg))
+	if(seg_virtresolves(&methods[0].imp, tseg, 1))
 	{
 		if(!nowarn)
 			PANIC("Missed automatic fix at %lx", (uintptr_t) &methods[0].imp - fbuf);
@@ -1212,14 +1674,14 @@ void fix_methods(uintptr_t fbuf, list_t* head, section* __objc_methname, seg_adj
 	for(int i=1; i<n; i++)
 	{
 		resolve_methname(fbuf, & methods[i].name, __objc_methname, tseg, rebase, nowarn);
-		if(seg_virtresolve(&methods[i].types, tseg))
+		if(seg_virtresolves(&methods[i].types, tseg, 1))
 		{
 			if(!nowarn)
 				PANIC("Missed automatic fix at %lx", (uintptr_t) &methods[i].types - fbuf);
 			push_rebase_entry(rebase, (uintptr_t)&methods[i].types);
 
 		}
-		if(seg_virtresolve(&methods[i].imp, tseg))
+		if(seg_virtresolves(&methods[i].imp, tseg, 1))
 		{
 			if(!nowarn)
 				PANIC("Missed automatic fix at %lx", (uintptr_t) &methods[i].imp - fbuf);
@@ -1249,7 +1711,7 @@ void fix_methods(uintptr_t fbuf, list_t* head, section* __objc_methname, seg_adj
 	
 }
 
-void fix_ivars(uintptr_t fbuf, list_t* head, section* __objc_methname, seg_adjust* tseg, seg_adjust* dseg, rebase_info* rebase)
+void fix_ivars(uintptr_t fbuf, list_t* head, section* __objc_methname, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs, rebase_info* rebase)
 {
 	int n = head->count;
 	
@@ -1257,12 +1719,12 @@ void fix_ivars(uintptr_t fbuf, list_t* head, section* __objc_methname, seg_adjus
 	
 	for(int i=0; i<n; i++)
 	{
-		if(seg_virtresolve(&ivars[i].offset, dseg))
+		if(seg_virtresolves(&ivars[i].offset, dsegs, ndsegs))
 		{
 			PANIC("Missed automatic fix at %lx", (uintptr_t) &ivars[i].offset - fbuf);
 
 		}
-		if(seg_virtresolve(&ivars[i].type, tseg))
+		if(seg_virtresolves(&ivars[i].type, tseg, 1))
 		{
 			PANIC("Missed automatic fix at %lx", (uintptr_t) &ivars[i].type - fbuf);
 
@@ -1280,11 +1742,11 @@ void fix_properties(uintptr_t fbuf, list_t* head, seg_adjust* tseg)
 	
 	for(int i=0; i<n; i++)
 	{
-		if(seg_virtresolve(&props[i].name, tseg))
+		if(seg_virtresolves(&props[i].name, tseg, 1))
 		{
 			PANIC("Missed automatic fix at %lx", (uintptr_t) &props[i].name - fbuf);
 		}
-		if(seg_virtresolve(&props[i].type, tseg))
+		if(seg_virtresolves(&props[i].type, tseg, 1))
 		{
 			PANIC("Missed automatic fix at %lx", (uintptr_t) &props[i].type - fbuf);
 
@@ -1298,23 +1760,23 @@ struct protocol_list_t
 	uint32_t list[];
 };
 
-void fix_protocols(protocol_list_t *protocols, seg_adjust* dseg)
+void fix_protocols(protocol_list_t *protocols, seg_adjust* dsegs, int ndsegs)
 {
 	int nProtocols = protocols->count;
 	for(int i=0; i<nProtocols; i++)
 	{
-		if(seg_virtresolve(&protocols->list[i], dseg))
+		if(seg_virtresolves(&protocols->list[i], dsegs, ndsegs))
 		{
 			PANIC("Missed virtresolve!");
 		}
 	}
 }
 
-void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, section* __objc_extradata, seg_adjust* tseg, seg_adjust* dseg, rebase_info* rebase)
+void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, section* __objc_extradata, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs, rebase_info* rebase)
 {
 	if(cls->name)
 	{
-		if(seg_virtresolve(&cls->name, tseg))
+		if(seg_virtresolves(&cls->name, tseg, 1))
 		{
 			PANIC("Missed automatic fix at %lx", (uintptr_t) &cls->name - fbuf);
 		}
@@ -1327,7 +1789,7 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 	
 	if(cls->ivarLayout)
 	{
-		if(seg_virtresolve(&cls->ivarLayout, dseg))
+		if(seg_virtresolves(&cls->ivarLayout, dsegs, ndsegs))
 		{
 			
 		}
@@ -1337,6 +1799,7 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 		}
 		else
 		{
+			CommonLog("%016lx", (uintptr_t)cls-fbuf);
 			CommonLog("WARNING: ivar layout; we don't know how to handle this!");
 		}
 	}
@@ -1344,7 +1807,7 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 	if(cls->baseMethods)
 	{
 		bool nowarn = 0;
-		if(seg_virtresolve(&cls->baseMethods, dseg))
+		if(seg_virtresolves(&cls->baseMethods, dsegs, ndsegs))
 		{
 			PANIC("Missed automatic fix at %lx", (uintptr_t) &cls->baseMethods - fbuf);
 		}
@@ -1391,11 +1854,11 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 			nowarn = 1;
 		}
 		
-		fix_methods(fbuf, (list_t*) (fbuf + cls->baseMethods), __objc_methname, tseg, dseg, rebase, nowarn);
+		fix_methods(fbuf, (list_t*) (fbuf + cls->baseMethods), __objc_methname, tseg, dsegs, ndsegs, rebase, nowarn);
 	}
 	if(cls->baseProtocols)
 	{
-		if(seg_virtresolve(&cls->baseProtocols, dseg))
+		if(seg_virtresolves(&cls->baseProtocols, dsegs, ndsegs))
 		{
 			CommonLog("Missed automatic fix at %lx", (uintptr_t) &cls->baseProtocols - fbuf);
 		}
@@ -1403,11 +1866,11 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 		{
 			PANIC("Cannot handle protocol copying yet!");
 		}
-		fix_protocols((protocol_list_t*) (fbuf + cls->baseProtocols), dseg);
+		fix_protocols((protocol_list_t*) (fbuf + cls->baseProtocols), dsegs, ndsegs);
 	}
 	if(cls->ivars)
 	{
-		if(seg_virtresolve(&cls->ivars, dseg))
+		if(seg_virtresolves(&cls->ivars, dsegs, ndsegs))
 		{
 			CommonLog("Missed automatic fix at %lx", (uintptr_t) &cls->ivars - fbuf);
 
@@ -1416,11 +1879,11 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 		{
 			PANIC("Cannot handle ivar copying yet!");
 		}
-		fix_ivars(fbuf, (list_t*) (fbuf + cls->ivars), __objc_methname, tseg, dseg, rebase);
+		fix_ivars(fbuf, (list_t*) (fbuf + cls->ivars), __objc_methname, tseg, dsegs, ndsegs, rebase);
 	}
 	if(cls->weakIvarLayout)
 	{
-		if(seg_virtresolve(&cls->weakIvarLayout, dseg))
+		if(seg_virtresolves(&cls->weakIvarLayout, dsegs, ndsegs))
 		{
 			CommonLog("Missed automatic fix at %lx", (uintptr_t) &cls->weakIvarLayout - fbuf);
 		}
@@ -1443,7 +1906,7 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 	
 	if(cls->baseProperties)
 	{
-		if(seg_virtresolve(&cls->baseProperties, dseg))
+		if(seg_virtresolves(&cls->baseProperties, dsegs, ndsegs))
 		{
 			CommonLog("Missed automatic fix at %lx", (uintptr_t) &cls->baseProperties - fbuf);
 
@@ -1458,36 +1921,55 @@ void fix_classdata(uintptr_t fbuf, class_ro_t* cls, section* __objc_methname, se
 }
 
 
-void fix_from_classlist(uintptr_t fbuf, section* sect, section* __objc_methname,  section* __objc_extradata, seg_adjust* tseg, seg_adjust* dseg, rebase_info* rebase)
+void fix_from_classlist(uintptr_t fbuf, section* sect, section* __objc_methname,  section* __objc_extradata, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs, rebase_info* rebase)
 {
 	uint32_t *classes = (uint32_t*) (fbuf + sect->offset);
 	int nClass = sect->size / sizeof(uint32_t);
 	
 	for(int i=0; i<nClass; i++)
 	{
+		//CommonLog("%d\n", i);
 		//uint32_t* class = &classes[i];
 		//seg_virtresolve(class, dsreg);
 		
 		class_t* cls = (class_t*) (fbuf + classes[i]);
 		class_t* meta = (class_t*) (fbuf + cls->isa);
 		
-		if(!seg_inoutput(classes[i], dseg))
+		if(!seg_inoutputs(classes[i], dsegs, ndsegs))
 		{
 			locate_address(classes[i], 1);
-			PANIC("Error finding in correct spot! %x %x", dseg->fix.offset.start, dseg->fix.offset.end);
+			PANIC("Error finding in correct spot!");// %x %x", dseg->fix.offset.start, dseg->fix.offset.end);
 		}
-		if(!seg_inoutput(cls->isa, dseg))
+		if(!seg_inoutputs(cls->isa, dsegs, ndsegs))
 			PANIC("Error finding in correct spot!");
 
-		if(!seg_inoutput(cls->data, dseg))
+		// cls->data
+		if(!seg_inoutputs(cls->data, dsegs, ndsegs))
+		{
+			CommonLog("cls->data = %08x", cls->data);
+			
+			for(int j=0; j<32; j++)
+			{
+				fprintf(stderr, "%02x", ((uint8_t*)(cls))[j]);
+				if(((j+1) & 3)==0)
+					if(((j+1) & 31)==0)
+						fprintf(stderr, "\n");
+					else
+						fprintf(stderr, " ");
+			}
+			fprintf(stderr, "--\n");
+			
+			
+			
 			PANIC("Error finding in correct spot!");
+		}
 
-		if(!seg_inoutput(meta->data, dseg))
+		if(!seg_inoutputs(meta->data, dsegs, ndsegs))
 			PANIC("Error finding in correct spot!");
 
 		//CommonLog("cls = %x, meta = %x data = %x", classes[i], cls->isa, cls->data);
-		fix_classdata(fbuf, (class_ro_t*) (fbuf + cls->data), __objc_methname, __objc_extradata, tseg, dseg, rebase);
-		fix_classdata(fbuf, (class_ro_t*) (fbuf + meta->data), __objc_methname, __objc_extradata, tseg, dseg, rebase);
+		fix_classdata(fbuf, (class_ro_t*) (fbuf + cls->data), __objc_methname, __objc_extradata, tseg, dsegs, ndsegs, rebase);
+		fix_classdata(fbuf, (class_ro_t*) (fbuf + meta->data), __objc_methname, __objc_extradata, tseg, dsegs, ndsegs, rebase);
 		
 	}
 }
@@ -1505,7 +1987,7 @@ struct protocol_t {
 };
 
 
-void fix_from_protolist(uintptr_t fbuf, section* sect, section* __objc_methname, section* __objc_extradata, seg_adjust* tseg, seg_adjust* dseg, rebase_info* rebase)
+void fix_from_protolist(uintptr_t fbuf, section* sect, section* __objc_methname, section* __objc_extradata, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs, rebase_info* rebase)
 {
 	uint32_t *protocols = (uint32_t*) (fbuf + sect->offset);
 	int nProtocol = sect->size / sizeof(uint32_t);
@@ -1519,7 +2001,7 @@ void fix_from_protolist(uintptr_t fbuf, section* sect, section* __objc_methname,
 		
 		if(proto->name)
 		{
-			if(seg_virtresolve(&proto->name, tseg))
+			if(seg_virtresolves(&proto->name, tseg, 1))
 			{
 				CommonLog("Missed automatic fix at %lx", (uintptr_t) &proto->name - fbuf);
 			}
@@ -1532,7 +2014,7 @@ void fix_from_protolist(uintptr_t fbuf, section* sect, section* __objc_methname,
 		
 		if(proto->protocols)
 		{
-			if(seg_virtresolve(&proto->protocols, dseg))
+			if(seg_virtresolves(&proto->protocols, dsegs, ndsegs))
 			{
 				CommonLog("Missed automatic fix at %lx", (uintptr_t) &proto->protocols - fbuf);
 			}
@@ -1557,13 +2039,13 @@ void fix_from_protolist(uintptr_t fbuf, section* sect, section* __objc_methname,
 				__objc_extradata->size += size;
 	
 			}
-			fix_protocols((protocol_list_t*) (fbuf + proto->protocols), dseg);
+			fix_protocols((protocol_list_t*) (fbuf + proto->protocols), dsegs, ndsegs);
 			
 		}
 		
 		if(proto->instanceMethods)
 		{
-			if(seg_virtresolve(&proto->instanceMethods, dseg))
+			if(seg_virtresolves(&proto->instanceMethods, dsegs, ndsegs))
 			{
 				CommonLog("Missed automatic fix at %lx", (uintptr_t) &proto->instanceMethods - fbuf);
 			}
@@ -1585,12 +2067,12 @@ void fix_from_protolist(uintptr_t fbuf, section* sect, section* __objc_methname,
 				__objc_extradata->size += size;
 				
 			}
-			fix_methods(fbuf, (list_t*) (fbuf + proto->instanceMethods), __objc_methname, tseg, dseg, rebase);
+			fix_methods(fbuf, (list_t*) (fbuf + proto->instanceMethods), __objc_methname, tseg, dsegs, ndsegs, rebase);
 			
 		}
 		if(proto->classMethods)
 		{
-			if(seg_virtresolve(&proto->instanceMethods, dseg))
+			if(seg_virtresolves(&proto->instanceMethods, dsegs, ndsegs))
 			{
 				CommonLog("Missed automatic fix at %lx", (uintptr_t) &proto->instanceMethods - fbuf);
 			}
@@ -1598,12 +2080,12 @@ void fix_from_protolist(uintptr_t fbuf, section* sect, section* __objc_methname,
 			{
 				PANIC("Need to search externally for proto->classMethods.  Not handled yet.");
 			}
-			fix_methods(fbuf, (list_t*) (fbuf + proto->classMethods), __objc_methname, tseg, dseg, rebase);
+			fix_methods(fbuf, (list_t*) (fbuf + proto->classMethods), __objc_methname, tseg, dsegs, ndsegs, rebase);
 			
 		}
 		if(proto->optionalInstanceMethods)
 		{
-			if(seg_virtresolve(&proto->optionalInstanceMethods, dseg))
+			if(seg_virtresolves(&proto->optionalInstanceMethods, dsegs, ndsegs))
 			{
 				CommonLog("Missed automatic fix at %lx", (uintptr_t) &proto->optionalInstanceMethods - fbuf);
 			}
@@ -1611,12 +2093,12 @@ void fix_from_protolist(uintptr_t fbuf, section* sect, section* __objc_methname,
 			{
 				PANIC("Need to search externally for proto->optionalInstanceMethods.  Not handled yet.");
 			}
-			fix_methods(fbuf, (list_t*) (fbuf + proto->optionalInstanceMethods), __objc_methname, tseg, dseg, rebase);
+			fix_methods(fbuf, (list_t*) (fbuf + proto->optionalInstanceMethods), __objc_methname, tseg, dsegs, ndsegs, rebase);
 			
 		}
 		if(proto->optionalClassMethods)
 		{
-			if(seg_virtresolve(&proto->optionalClassMethods, dseg))
+			if(seg_virtresolves(&proto->optionalClassMethods, dsegs, ndsegs))
 			{
 				CommonLog("Missed automatic fix at %lx", (uintptr_t) &proto->optionalClassMethods - fbuf);
 			}
@@ -1624,12 +2106,12 @@ void fix_from_protolist(uintptr_t fbuf, section* sect, section* __objc_methname,
 			{
 				PANIC("Need to search externally for proto->optionalClassMethods.  Not handled yet.");
 			}
-			fix_methods(fbuf, (list_t*) (fbuf + proto->optionalClassMethods), __objc_methname, tseg, dseg, rebase);
+			fix_methods(fbuf, (list_t*) (fbuf + proto->optionalClassMethods), __objc_methname, tseg, dsegs, ndsegs, rebase);
 			
 		}
 		if(proto->instanceProperties)
 		{
-			if(seg_virtresolve(&proto->instanceProperties, dseg))
+			if(seg_virtresolves(&proto->instanceProperties, dsegs, ndsegs))
 			{
 				CommonLog("Missed automatic fix at %lx", (uintptr_t) &proto->instanceProperties - fbuf);
 			}
@@ -1653,7 +2135,7 @@ struct category_t {
     uint32_t instanceProperties;
 };
 
-void fix_from_catlist(uintptr_t fbuf, section* sect, section* __objc_methname, section* __objc_extradata, seg_adjust* tseg, seg_adjust* dseg, rebase_info* rebase)
+void fix_from_catlist(uintptr_t fbuf, section* sect, section* __objc_methname, section* __objc_extradata, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs, rebase_info* rebase)
 {
 	uint32_t *categories = (uint32_t*) (fbuf + sect->offset);
 	int nCategory = sect->size / sizeof(uint32_t);
@@ -1687,7 +2169,7 @@ void fix_from_catlist(uintptr_t fbuf, section* sect, section* __objc_methname, s
 			if(in_dyld_cache(cat->protocols))
 				PANIC("Out of range!");
 			
-			fix_protocols((protocol_list_t*) (fbuf + cat->protocols), dseg);
+			fix_protocols((protocol_list_t*) (fbuf + cat->protocols), dsegs, ndsegs);
 		}
 		
 		if(cat->instanceMethods)
@@ -1695,7 +2177,7 @@ void fix_from_catlist(uintptr_t fbuf, section* sect, section* __objc_methname, s
 			if(in_dyld_cache(cat->instanceMethods))
 				PANIC("Out of range!");
 			
-			fix_methods(fbuf, (list_t*) (fbuf + cat->instanceMethods), __objc_methname, tseg, dseg, rebase);
+			fix_methods(fbuf, (list_t*) (fbuf + cat->instanceMethods), __objc_methname, tseg, dsegs, ndsegs, rebase);
 			
 		}
 		if(cat->classMethods)
@@ -1703,7 +2185,7 @@ void fix_from_catlist(uintptr_t fbuf, section* sect, section* __objc_methname, s
 			if(in_dyld_cache(cat->classMethods))
 				PANIC("Out of range!");
 			
-			fix_methods(fbuf, (list_t*) (fbuf + cat->classMethods), __objc_methname, tseg, dseg, rebase);
+			fix_methods(fbuf, (list_t*) (fbuf + cat->classMethods), __objc_methname, tseg, dsegs, ndsegs, rebase);
 			
 		}
 		if(cat->instanceProperties)
@@ -1721,7 +2203,8 @@ struct hack_context
 {
 	exported_node* basenode;
 	seg_adjust* tseg;
-	seg_adjust* dseg;
+	seg_adjust* dsegs;
+	int ndsegs;
 };
 
 void hack_export_callback(exported_node* node, uintptr_t ctx)
@@ -1740,18 +2223,18 @@ void hack_export_callback(exported_node* node, uintptr_t ctx)
 	if(node->flags & EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER)
 	{
 		node->stub += context->tseg->old.vmaddr.start;// + shared_cache_slide;
-		if(!seg_virtresolve(&node->stub, context->tseg))
+		if(!seg_virtresolves(&node->stub, context->tseg, 1))
 		{
-			if(!seg_virtresolve(&node->stub, context->dseg))
+			if(!seg_virtresolves(&node->stub, context->dsegs, context->ndsegs))
 			{
 				CommonLog("Could not locate %x", node->stub);
 			}
 		}
 		
 		node->resolver += context->tseg->old.vmaddr.start;// + shared_cache_slide;
-		if(!seg_virtresolve(&node->resolver, context->tseg))
+		if(!seg_virtresolves(&node->resolver, context->tseg, 1))
 		{
-			if(!seg_virtresolve(&node->stub, context->dseg))
+			if(!seg_virtresolves(&node->stub, context->dsegs, context->ndsegs))
 			{
 				CommonLog("Could not locate %x", node->stub);
 			}
@@ -1772,9 +2255,9 @@ void hack_export_callback(exported_node* node, uintptr_t ctx)
 	//	CommonLog("1node = %p child = %x", node, (uintptr_t)(node)->child);
 		
 		node->stub += context->tseg->old.vmaddr.start + shared_cache_slide;
-		if(!seg_virtresolve(&node->stub, context->dseg))
+		if(!seg_virtresolves(&node->stub, context->dsegs, context->ndsegs))
 		{	
-			if(!seg_virtresolve(&node->stub, context->tseg))
+			if(!seg_virtresolves(&node->stub, context->tseg, 1))
 			{
 				CommonLog("Could not locate %x", node->stub);
 			}
@@ -1797,13 +2280,14 @@ void hack_export_callback(exported_node* node, uintptr_t ctx)
 	
 }
 
-int hack_export_commands(uintptr_t src, uint32_t size, seg_adjust* tseg, seg_adjust* dseg)
+int hack_export_commands(uintptr_t src, uint32_t size, seg_adjust* tseg, seg_adjust* dsegs, int ndsegs)
 {
 	hack_context context;
 	context.basenode = NULL;
 	
 	context.tseg = tseg;
-	context.dseg = dseg;
+	context.dsegs = dsegs;
+	context.ndsegs = ndsegs;
 	
 	char strbuf[0x200];
 	
@@ -1843,36 +2327,7 @@ int hack_export_commands(uintptr_t src, uint32_t size, seg_adjust* tseg, seg_adj
 }
 
 
-segment_command* find_segment(uintptr_t fbuf, const char* name)
-{
-	mach_header* header = (mach_header*) fbuf;
-	
-	uint32_t ncmds = header->ncmds;
-	//uint32_t sizeofcmds = header->sizeofcmds;
-	uintptr_t cmd_base = fbuf + sizeof(mach_header);
-	
-	
-	// first scan: make sure we have space
-	{
-		//uint32_t lowestOffset;
-		
-		uintptr_t lcptr = cmd_base;
-		for(uint32_t i=0; i<ncmds; i++)
-		{
-			uint32_t cmd = ((load_command*) lcptr)->cmd;
-		
-			if(cmd == LC_SEGMENT)
-			{
-				segment_command* seg = (segment_command*) lcptr;
-				if(!strncmp(seg->segname, name, 16))
-					return seg;
-			}
-			lcptr += ((load_command*) lcptr)->cmdsize;
-			
-		}
-	}
-	return NULL;
-}
+
 
 section* append_section(uintptr_t fbuf, section* newsect)
 {
@@ -1977,6 +2432,38 @@ void remove_commandtype(uintptr_t fbuf, int cmd)
 
 
 
+void ProcessSegment(uintptr_t old_data, ptrdiff_t old_offs, segment_command* old_seg, seg_adjust* adjust, seg_info* fdinfo)
+{
+	// where do you come from
+	adjust->old.vmaddr.start = old_seg->vmaddr;
+	adjust->old.vmaddr.end = old_seg->vmaddr + old_seg->vmsize;
+	
+	adjust->old.offset.start = old_offs;
+	adjust->old.offset.end = old_offs + old_seg->filesize;
+	
+	adjust->old.buf = old_data;
+	
+	
+	// where do you go
+	adjust->fix.vmaddr.start = fdinfo->vmaddr.end;
+	adjust->fix.vmaddr.end = fdinfo->vmaddr.end + old_seg->vmsize;
+	
+	adjust->fix.offset.start = fdinfo->offset.end;
+	adjust->fix.offset.end = fdinfo->offset.end + old_seg->filesize;
+	
+	adjust->fix.buf = fdinfo->buf + fdinfo->offset.end;
+	
+	
+	// clone the segment
+	memcpy((void*) adjust->fix.buf, (void*) adjust->old.buf, old_seg->filesize);
+	
+	// cotton eyed joe....adjust the out_seg
+	fdinfo->vmaddr.end += old_seg->vmsize;
+	fdinfo->offset.end += old_seg->filesize;
+	
+	adjust->dvmaddr = adjust->fix.vmaddr.start - adjust->old.vmaddr.start;
+	adjust->doffset = adjust->fix.offset.start - adjust->old.offset.start;
+}
 
 
 void extract_file(uintptr_t xbuf, const char* fname)//name)
@@ -2001,16 +2488,37 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 	int nfile;
 	
 	
+	seg_info fdinfo;
+	fdinfo.vmaddr.start = 0;
+	fdinfo.vmaddr.end = 0;
+	fdinfo.offset.start = 0;
+	fdinfo.offset.end = 0;
+
 	seg_adjust tseg;
+	
+	/*
 	seg_adjust dseg;
+	seg_adjust dseg_dirty;
+	seg_adjust dseg_const;
+	*/
+	
+	int ndsegs = 0;
+	seg_adjust dsegs[3];
+
 	
 	
 //	segment_command* oldtext;
 //	segment_command* olddata;
 	
+//	segment_command* data = NULL;
+//	segment_command* data_dirty = NULL;
+//	segment_command* data_const = NULL;
+	
+	segment_command* text = NULL;
+	segment_command* datas[3] = {NULL, NULL, NULL};
+	
 	{
-		segment_command* text = NULL;
-		segment_command* data = NULL;
+		
 		intptr_t lcptr = xbuf + sizeof(mach_header);
 		for(uint32_t i=0; i<ncmds; i++)
 		{
@@ -2020,31 +2528,31 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			{
 				segment_command* seg = (segment_command*) lcptr;
 				//print_segment(seg);
-				if(!strcmp(seg->segname, SEG_TEXT))
+				if(!strncmp(seg->segname, SEG_TEXT, 16))
 				{
 					text = seg;
 				}
-				else if(!strcmp(seg->segname, SEG_DATA))
+				else if(!strncmp(seg->segname, SEG_DATA, 16) || !strncmp(seg->segname, SEG_DATA_DIRTY, 16) || !strncmp(seg->segname, SEG_DATA_CONST, 16))
 				{
-					data = seg;
+					datas[ndsegs] = seg;
+					ndsegs++;
 				}
-				else if(!strcmp(seg->segname, SEG_LINKEDIT))
+				else if(!strncmp(seg->segname, SEG_LINKEDIT, 16))
 				{
 				//	linkedit = seg;
 				}
 				else
 				{
-				//	PANIC("Unrecognized segment in file");
-					
-					
+					PANIC("Unrecognized segment in file");
 				}
 			}
 			lcptr += ((load_command*) lcptr)->cmdsize;
 		}
 		
-		nfile = (text ? text->vmsize : 0) + (data ? data->vmsize : 0);
+		nfile = (text ? text->vmsize : 0);
+		for(int i=0; i<ndsegs; i++)
+			nfile += datas[i]->vmsize;
 		
-		//CommonLog("WARNING: No data section!");
 		
 		
 		char fpath[0x80];
@@ -2061,38 +2569,31 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			}
 		}
 		
-		
+		//CommonLog("Creating file of size %x", nfile + 0x1000000);
 		
 		fd = fdcreate(fname, nfile + 0x1000000, &fbuf);	// allocate 1MB extra for the linkedit.  maybe not enough?
 		
+		fdinfo.buf = fbuf;
+		
+		if(text)
 		{
-		
-			tseg.old.vmaddr.start = text->vmaddr;
-			tseg.old.vmaddr.end = tseg.old.vmaddr.start + text->vmsize;
-			tseg.old.offset.start = text->fileoff;
-			tseg.old.offset.end = text->fileoff + text->filesize;
-			tseg.old.buf = xbuf;
-		
-			tseg.fix.vmaddr.start = 0;
-			tseg.fix.vmaddr.end   = 0 +text->vmsize;
-			tseg.fix.offset.start = 0;
-			tseg.fix.offset.end   = 0 + text->filesize;
-			tseg.fix.buf = fbuf;
+			ProcessSegment(xbuf, xbuf-dyld_buf, text, &tseg, &fdinfo);
 			
-			memcpy((void*) tseg.fix.buf, (void*) tseg.old.buf, text->filesize);
-			
-			tseg.dvmaddr = tseg.fix.vmaddr.start - tseg.old.vmaddr.start;
-			tseg.doffset = tseg.fix.offset.start - tseg.old.offset.start;
-			/*
-			text = (segment_command*) (fbuf + ((uintptr_t) text - xbuf));
-			text->vmaddr = tseg.new.vmaddr.start;
-			text->fileoff = tseg.new.fileoff.start;
-			*/
-		//	CommonLog("text vmaddr: %x to %x", tseg.old.vmaddr.start, tseg.fix.vmaddr.start);
-		//	CommonLog("text offset: %x to %x", tseg.old.offset.start, tseg.fix.offset.start);
-			
+			seg_applyoffset(find_segment(fbuf, SEG_TEXT), &tseg);
+		//	CommonLog("Fixed partially text segment");
+
 		}
 		
+		for(int i=0; i<ndsegs; i++)
+		{
+			segment_command* data = datas[i];
+			
+			ProcessSegment(dyld_buf + data->fileoff, data->fileoff, data, &dsegs[i], &fdinfo);
+			seg_applyoffset(find_segment(fbuf, data->segname), &dsegs[i]);
+		//	CommonLog("Fixed partially data segment %x", i);
+		}
+		
+		/*
 		if(data)
 		{
 			dseg.old.vmaddr.start = data->vmaddr;
@@ -2112,6 +2613,7 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			
 			dseg.dvmaddr = dseg.fix.vmaddr.start - dseg.old.vmaddr.start;
 			dseg.doffset = dseg.fix.offset.start - dseg.old.offset.start;
+			
 			
 		//	CommonLog("data vmaddr: %x to %x", dseg.old.vmaddr.start, dseg.fix.vmaddr.start);
 		//	CommonLog("data offset: %x to %x", dseg.old.offset.start, dseg.fix.offset.start);
@@ -2135,136 +2637,172 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			dseg.dvmaddr = dseg.fix.vmaddr.start - dseg.old.vmaddr.start;
 			dseg.doffset = dseg.fix.offset.start - dseg.old.offset.start;
 
-		}
+		}*/
 	}
+	
+	/*
+	CommonLog("Outputting stream...\n");
+	for(int i=0x149e; i<0x14a2; i++)
+	{
+		fprintf(stderr, "%02x", ((uint8_t*)fbuf)[i]);
+	}
+	fprintf(stderr, "\n");
+	{
+		uint16_t msb = *(uint16_t*)(fbuf+0x149e) & 0x7ff;
+		uint16_t lsb = *(uint16_t*)(fbuf+0x14a0) & 0x7ff;
+		uint32_t res = (msb<<12) | (lsb<<1);
+		if(res & (1<<22))
+			res |= 0xFF800000;
+		
+		CommonLog("offset = %08x %08x %08x", res, msb, lsb);
+			
+	}
+	
+	exit(1);
+	*/
 	
 	
 	
 	header = (mach_header*) fbuf;
 	
-	/*
-	{
-		int nsects = text->nsects;
-		section* sects = (section*) ((uintptr_t) text + sizeof(segment_command));
-		for(int i=0; i<nsects; i++)
-		{
-			sects[i].addr += dvmaddr_text;
-			if(sects[i].offset)
-				sects[i].offset += dfileoff_text;
-		}
-	}
-	{
-		int nsects = data->nsects;
-		section* sects = (section*) ((uintptr_t) data + sizeof(segment_command));
-		for(int i=0; i<nsects; i++)
-		{
-			sects[i].addr += dvmaddr_data;
-			if(sects[i].offset)
-				sects[i].offset += dfileoff_data;
-		}
-	}
-	*/
-	
-	
-	
-	
-	//dyld_cache_slide_info_entry* entry_table = (dyld_cache_slide_info_entry*) malloc((dseg.fix.vmaddr.end + 0x1000 - dseg.fix.vmaddr.start)/32);
-	
-	
-	
 	// "64k should be plenty" - Bill Gates
 	
-	seg_applyoffset(find_segment(fbuf, SEG_TEXT), &tseg);
-	seg_applyoffset(find_segment(fbuf, SEG_DATA), &dseg);
 	
 	
-	rebase_info rebase = {0, 0, 0, dseg.fix.buf};
+	rebase_info rebase = {0, 0, 0, dsegs[0].fix.buf};
 	//relocation_table reloc = {0,0,0};
 	
+	
+	// for each data segment
 	{
-		//CommonLog("Now %d entries", reloc.nEntries);
-
-		dyld_cache_mapping_info* mapping = (dyld_cache_mapping_info*) (dyld_buf + dyldHead->mappingOffset);
-		uint32_t dataCacheOffset = mapping[1].address;
-	
-		dyld_cache_slide_info* slide = (dyld_cache_slide_info*) (dyld_buf + dyldHead->slideInfoOffset);
-		//int slideSize = dyldHead->slideInfoSize;
-	
-		uint16_t *slide_toc_index  = (uint16_t*) ((uintptr_t)slide + slide->toc_offset);
-		dyld_cache_slide_info_entry* slide_entries = (dyld_cache_slide_info_entry*) ((uintptr_t)slide + slide->entries_offset);
-		
 		uint32_t foundt = 0;
 		uint32_t foundd = 0;
 		uint32_t missed = 0;
 		uint32_t missed_z = 0;
 		uint32_t missed_dyld = 0;
-		
-		
-		for(uint32_t i = (dseg.old.vmaddr.start - dataCacheOffset) / 0x1000, k=0; i < (dseg.old.vmaddr.end - dataCacheOffset) / 0x1000; i++, k++)
+
+		for(int ds = 0; ds < ndsegs; ds++)
 		{
-			uint8_t *bits = slide_entries[slide_toc_index[i]].bits;
-			uintptr_t pagebase = dseg.fix.buf + 0x1000 * k;
+			seg_adjust* segment = &dsegs[ds];
 			
-			for(uint32_t j=0; j<0x1000/4; j++)
+			//CommonLog("Now %d entries", reloc.nEntries);
+
+			dyld_cache_mapping_info* mapping = (dyld_cache_mapping_info*) (dyld_buf + dyldHead->mappingOffset);
+			uint32_t dataCacheOffset = mapping[1].address;
+			
+			
+			//CommonLog("number of mappings: %d", dyldHead->mappingCount);
+			//for(int i=0; i<dyldHead->mappingCount; i++)
+			//{
+			//	CommonLog("Entry %d: %016lx %016lx %016lx %08x %08x", i, mapping[i].address, mapping[i].size, mapping[i].fileOffset, mapping[i].maxProt, mapping[i].initProt);
+			//
+			//}
+			
+			//CommonLog("Slide info: %08lx %016lx", dyldHead->slideInfoOffset, dyldHead->slideInfoSize * 32);
+			
+			// dyld_cache_slide_info* entries_count
+		
+			dyld_cache_slide_info* slide = (dyld_cache_slide_info*) (dyld_buf + dyldHead->slideInfoOffset);
+			//int slideSize = dyldHead->slideInfoSize;
+		
+			uint16_t *slide_toc_index  = (uint16_t*) ((uintptr_t)slide + slide->toc_offset);
+			dyld_cache_slide_info_entry* slide_entries = (dyld_cache_slide_info_entry*) ((uintptr_t)slide + slide->entries_offset);
+			
+			
+			uint64_t vmoffset_start = segment->old.vmaddr.start - dataCacheOffset;
+			uint64_t vmoffset_end = segment->old.vmaddr.end - dataCacheOffset;
+			
+			CommonLog("processing data segment: %08Lx %08Lx (%08x)", vmoffset_start, vmoffset_end, segment->old.vmaddr.start);
+			
+
+			for(uint32_t i = (vmoffset_start) / 0x1000, k=0; i < (segment->old.vmaddr.end - dataCacheOffset + 0xFFF) / 0x1000; i++, k++)
 			{
-				if(bits[j>>3] & (1<<(j&7)))
+				// bits: map a 4-byte relocation offset to a 1-bit value
+				
+				uint8_t *bits = slide_entries[slide_toc_index[i]].bits;
+				uintptr_t pagebase = segment->fix.buf + 0x1000 * k;
+				//CommonLog("base = %p", 0x1000*(i+k) + 0);
+				
+				for(uint32_t j=0; j<0x1000/4; j++)
 				{
-					if(seg_virtresolve((uint32_t*)(pagebase + j*4), &tseg))
+					
+					if(bits[j>>3] & (1<<(j&7)))
 					{
-						foundt++;
+						uint64_t realvaddr = 0x1000*(i) +j*4;
+						if(realvaddr < vmoffset_start || realvaddr > vmoffset_end)
+							continue;
+						//CommonLog("val = %p", realvaddr);
 						
-						push_rebase_entry(&rebase, (pagebase + j*4));
 						
-					//	entry_table[k].bits[j>>3] |= (1<<(j&7));
-					}
-					else if (seg_virtresolve((uint32_t*)(pagebase + j*4), &dseg))
-					{
-						foundd++;
-						push_rebase_entry(&rebase, (pagebase + j*4));
-						
-						// flag for relocation table later
-					//	entry_table[k].bits[j>>3] |= (1<<(j&7));
-					//	CommonLog("Matched %x in dseg", dseg.fix.vmaddr.start + j*4);
-					}
-					else
-					{
-					//	entry_table[k].bits[j>>3] |= (1<<(j&7));
-						if(in_dyld_cache(*(uint32_t*)(pagebase + j*4)))
+						if(seg_virtresolves((uint32_t*)(pagebase + j*4), &tseg, 1))
 						{
-							missed_dyld++;
+							foundt++;
+							
+							push_rebase_entry(&rebase, (pagebase + j*4));
+							//CommonLog("0");
+							continue;
+							
+						//	entry_table[k].bits[j>>3] |= (1<<(j&7));
 						}
-						else if(*(uint32_t*)(pagebase + j*4) == 0)
 						{
-							missed_z++;
+							if (seg_virtresolves((uint32_t*)(pagebase + j*4), dsegs, ndsegs))
+							{
+							//	CommonLog("Found entry! %d", ds2);
+								foundd++;
+								push_rebase_entry(&rebase, (pagebase + j*4));
+								continue;
+							}
 						}
-						else
 						{
-							CommonLog("WARNING: slide did not match %x : %x", dseg.fix.vmaddr.start + j*4, *(uint32_t*)(pagebase + j*4));
-							missed++;
+							if(in_dyld_cache(*(uint32_t*)(pagebase + j*4)))
+							{
+							//	CommonLog("%08x", *(uint32_t*)(pagebase + j*4));
+								
+								missed_dyld++;
+							}
+							else if(*(uint32_t*)(pagebase + j*4) == 0)
+							{
+								missed_z++;
+							}
+							else
+							{
+								CommonLog("WARNING: slide did not match %x : %x", segment->fix.vmaddr.start + j*4, *(uint32_t*)(pagebase + j*4));
+								missed++;
+							}
+							
 						}
-						
+						//CommonLog("2");
+
 					}
 				}
+				//PANIC("Done trying");
 			}
-			//PANIC("Done trying");
+			CommonLog("Easily resolved %d text, %d data references.  Missed %d external, %d zero, and %d other symbols.", foundt, foundd, missed_dyld, missed_z, missed);
 		}
-		//CommonLog("Easily resolved %d text, %d data references.  Missed %d external, %d zero, and %d other symbols.", foundt, foundd, missed_dyld, missed_z, missed);
-		//CommonLog("Now %d entries", reloc.nEntries);
+		//CommonLog("Now %d entries", rebase.count);
+
+
+		//exit(1);
 	}
+	
+	//seg_adjust dseg = dsegs[0];
+	
 	
 	
 	struct section* __objc_extradata = NULL;
 	//if(objc)
 	{
+		
 		struct section __objc_extradata_raw = 
 			{
 				"__objc_xtradata",
-				"__DATA",
+				"",
+				//"__DATA",
 				//dseg.old.vmaddr.end,
-				dseg.fix.vmaddr.end,
+				dsegs[ndsegs-1].fix.vmaddr.end,
 				0,
 				//dseg.old.offset.end,
-				dseg.fix.offset.end,
+				dsegs[ndsegs-1].fix.offset.end,
 				2,
 				0,
 				0,
@@ -2272,6 +2810,7 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 				0,
 				0
 			};
+		memcpy(&(__objc_extradata_raw.segname), datas[ndsegs-1]->segname, 16);
 		__objc_extradata = append_section(fbuf, &__objc_extradata_raw);
 		
 		if(__objc_extradata)
@@ -2287,7 +2826,8 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 	dysymtab_command* dsym = NULL;
 	dyld_info_command* dinfo = NULL;
 	linkedit_data_command* fnstart = NULL;
-	
+	linkedit_data_command* dic = NULL;
+		
 	
 	section* __objc_methname = NULL;
 	section* __objc_classname = NULL;
@@ -2311,6 +2851,11 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 	section* __objc_const = NULL;
 	
 	section* __data = NULL;
+	section* __dyld = NULL;
+	
+	section* __text = NULL;
+	section* __pss = NULL;
+	section* __la_symbol_ptr = NULL;
 	//section* __objc_data = NULL;
 	
 	
@@ -2329,7 +2874,8 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			{
 			case LC_SEGMENT:
 				{
-
+					
+					
 					segment_command* seg = (segment_command*) lcptr;
 					if(!strcmp(seg->segname, SEG_TEXT))
 					{
@@ -2347,11 +2893,11 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 								{
 									if(!strncmp(sect->sectname, "__text", 16))
 									{
-										text_dellvm(fbuf, sect, &tseg, &dseg);
+										__text = sect;
 									}
 									else if(!strncmp(sect->sectname, "__stub_helper", 16))
 									{
-										stub32_fix(fbuf, sect, &tseg, &dseg, 0);
+										//stub32_fix(fbuf, sect, &tseg, dsegs, ndsegs, 0);
 										__stub_helper = sect;
 									}
 									else if(!strncmp(sect->sectname, "__const", 16))
@@ -2377,13 +2923,14 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 								{
 									if(!strncmp(sect->sectname, "__picsymbolstub4", 16))
 									{
-										stub32_fix(fbuf, sect, &tseg, &dseg, 1);
+										__pss = sect;
+										//stub32_fix(fbuf, sect, &tseg, dsegs, ndsegs, 0);//1);
 									//	break;
 									}
 									else
 									{
 									
-									//	CommonLog("Not handling section of type %s (%.16s.%.16s)", section_types[type], sect->segname, sect->sectname);
+										//PANIC("Not handling section of type %s (%.16s.%.16s)", section_types[type], sect->segname, sect->sectname);
 									}
 									break;
 								}
@@ -2423,8 +2970,8 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 						}
 					}
 					
-					
-					if(!strcmp(seg->segname, SEG_DATA))
+					if(!strncmp(seg->segname, SEG_DATA, 16) || !strncmp(seg->segname, SEG_DATA_DIRTY, 16) || !strncmp(seg->segname, SEG_DATA_CONST, 16))
+					//if(!strcmp(seg->segname, SEG_DATA))
 					{
 					//	seg_applyoffset(seg, &dseg);
 						int nsects = seg->nsects;
@@ -2440,15 +2987,20 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 								{
 									if(!strncmp(sect->sectname, "__const", 16))
 									{
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									else if(!strncmp(sect->sectname, "__data", 16))
 									{
 										__data = sect;
 									}
+									else if(!strncmp(sect->sectname, "__dyld", 16))
+									{
+										__dyld = sect;	
+									}
+									
 									else if(!strncmp(sect->sectname, "__cfstring", 16))
 									{
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									else if(!strncmp(sect->sectname, "__objc_data", 16))
 									{
@@ -2457,14 +3009,14 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 										
 										// disable the z bit so we can find problems :)
 									
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									else if(!strncmp(sect->sectname, "__objc_classlist", 16))
 									{
 										objc = 1;
 									//	CommonLog("Found __objc_classlist");
 										__objc_classlist = sect;
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									else if(!strncmp(sect->sectname, "__objc_catlist", 16))
 									{
@@ -2472,29 +3024,29 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 									//	CommonLog("Found __objc_catlist");
 										__objc_catlist = sect;
 									//	CommonLog("size is %x", sect->size);
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									else if(!strncmp(sect->sectname, "__objc_protolist", 16))
 									{
 										objc = 1;
 									//	CommonLog("Found __objc_protolist");
 										__objc_protolist = sect;
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									else if(!strncmp(sect->sectname, "__objc_protorefs", 16))
 									{
 										objc = 1;
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									else if(!strncmp(sect->sectname, "__objc_classrefs", 16))
 									{
 										objc = 1;
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									else if(!strncmp(sect->sectname, "__objc_superrefs", 16))
 									{
 										objc = 1;
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									
 									
@@ -2527,7 +3079,7 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 								{
 									if(!strncmp(sect->sectname, "__nl_symbol_ptr", 16))
 									{
-										extz_fix(fbuf, sect, &tseg, &dseg);
+										extz_fix(fbuf, sect, &tseg, dsegs, ndsegs);
 									}
 									else
 									{
@@ -2539,7 +3091,9 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 								{
 									if(!strncmp(sect->sectname, "__la_symbol_ptr", 16))
 									{
-										lazy_fix(fbuf, sect, __stub_helper, &tseg, &dseg, &rebase);
+										// &tseg, dsegs, ndsegs,
+										__la_symbol_ptr = sect;
+										lazy_fix(fbuf, sect, __stub_helper,  &rebase);
 									}
 									else
 									{
@@ -2569,6 +3123,43 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 					}
 				}
 				break;
+			
+			case LC_SUB_FRAMEWORK:
+			case LC_LOAD_UPWARD_DYLIB:
+				break;
+			/*
+			case LC_SUB_FRAMEWORK:
+			case LC_REQ_DYLD | LC_LOAD_UPWARD_DYLIB:
+			case LC_DATA_IN_CODE:
+				break;
+				*/
+			case LC_SEGMENT_SPLIT_INFO:
+				
+				// no longer in cache.  ignore.  or delete??
+				break;
+				/*
+				
+			 // 0x1e
+			
+				linkedit_data_command* splitinfo = (linkedit_data_command*) lcptr;
+				
+				CommonLog("split info: %x %x", splitinfo->dataoff, splitinfo->datasize);
+				//exit(1);
+				
+				break;
+				extract_file/2631: Load command 1e not yet processed
+				extract_file/2631: Load command 80000023 not yet processed
+				extract_file/2631: Load command 80000023 not yet processed
+				extract_file/2631: Load command 80000023 not yet processed
+				extract_file/2631: Load command 80000023 not yet processed
+				extract_file/2631: Load command 80000023 not yet processed
+				extract_file/2631: Load command 80000023 not yet processed
+				extract_file/2631: Load command 80000023 not yet processed
+				extract_file/2631: Load command 12 not yet processed
+				extract_file/2631: Load command 29 not yet processed
+				*/
+			
+			
 			case LC_SYMTAB:
 				sym = (symtab_command*) lcptr;
 				break;
@@ -2588,7 +3179,9 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			case LC_VERSION_MIN_IPHONEOS:
 				break;
 			case LC_FUNCTION_STARTS:
+
 				fnstart = (linkedit_data_command*) lcptr;
+				//CommonLog("fnstart info: %x %x", fnstart->dataoff, fnstart->datasize);
 				break;
 			case LC_SOURCE_VERSION:
 				break;
@@ -2596,6 +3189,10 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 				break;
 			case LC_LOAD_WEAK_DYLIB:
 				break;
+			case LC_DATA_IN_CODE:
+				dic = (linkedit_data_command*) lcptr;
+				break;
+				
 			default:
 				CommonLog("Load command %x not yet processed", cmd);
 				break;
@@ -2607,7 +3204,16 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 		
 	}
 	
+	if(__text)
+	{
+		text_dellvm(fbuf, __text, &tseg, dsegs, ndsegs);
+	}
+	if(__text && __pss && __stub_helper)
+	{
+		text_fixlongcalls(fbuf, __text, __pss, __la_symbol_ptr, &tseg, dsegs, ndsegs);
+	}
 	
+
 	if(objc && !__objc_extradata)
 	{
 		PANIC("Unable to add critical objc_xtradata section");
@@ -2620,28 +3226,41 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 	
 //	linkedit = find_segment(fbuf, SEG_LINKEDIT);
 	
+	// datas[ndsegs-1]->segname  /// need way to integrate with other two segments...
+	
+	
+	
 	if(__objc_classlist)
 	{
-		fix_from_classlist(fbuf, __objc_classlist, __objc_methname, __objc_extradata, &tseg, &dseg, &rebase);
+		fix_from_classlist(fbuf, __objc_classlist, __objc_methname, __objc_extradata, &tseg, dsegs, ndsegs, &rebase);
 	}
 	
 	//CommonLog("%p %p %p %p %p %p %p", fbuf, __objc_protolist, __objc_methname, __objc_extradata, &tseg, &dseg, &rebase);
 	if(__objc_protolist)
 	{
-		fix_from_protolist(fbuf, __objc_protolist, __objc_methname, __objc_extradata, &tseg, &dseg, &rebase);
+		fix_from_protolist(fbuf, __objc_protolist, __objc_methname, __objc_extradata, &tseg, dsegs, ndsegs, &rebase);
 	}
 	if(__objc_const)
-		rebasez_fix(fbuf, __objc_const, &tseg, &dseg, &rebase);	// WHY??? :(
+		rebasez_fix(fbuf, __objc_const, &tseg, dsegs, ndsegs, &rebase);	// WHY??? :(
 	
 	if(__objc_catlist)
 	{
-		fix_from_catlist(fbuf, __objc_catlist, __objc_methname, __objc_extradata, &tseg, &dseg, &rebase);
+		fix_from_catlist(fbuf, __objc_catlist, __objc_methname, __objc_extradata, &tseg, dsegs, ndsegs, &rebase);
 	}
+	
+	
+	/*
 	
 	if(__data)
 	{
 	//	extz_fix(fbuf, __data, &tseg, &dseg);
 	}
+	
+	if(__dyld) // ????
+	{
+		extz_fix(fbuf, __dyld, &tseg, dsegs, ndsegs);
+	}
+	*/
 
 	if(__objc_extradata)
 	{
@@ -2824,7 +3443,7 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 			
 		//	int oldsize = dinfo->export_size;
 			
-			dinfo->export_size = hack_export_commands(fbuf + dinfo->export_off, dinfo->export_size, &tseg, &dseg);
+			dinfo->export_size = hack_export_commands(fbuf + dinfo->export_off, dinfo->export_size, &tseg, dsegs, ndsegs);
 			
 		//	CommonLog("Old export size: %x new size: %x", oldsize, dinfo->export_size);
 			nfile += dinfo->export_size;
@@ -2844,8 +3463,23 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 		nfile += fnstart->datasize;
 	}
 	
+	if(dic)
+	{
+		memcpy((void*)(fbuf + nfile), (void*)(dyld_buf + dic->dataoff), dic->datasize);
+		dic->dataoff = nfile;
+		nfile += dic->datasize;
+	}
 	
-	
+	// split info was removed already!
+	/*
+	if(splitinfo)
+	{
+		//memcpy((void*)(fbuf + nfile), (void*)(dyld_buf + fnstart->dataoff), fnstart->datasize);
+		splitinfo->dataoff = nfile;
+		splitinfo->datasize = 0;
+//		nfile += fnstart->datasize;
+	}
+	*/
 	
 	{
 		//CommonLog("Syms %x(%x) Stroff %x(%x)", sym->symoff, sym->nsyms*sizeof(struct nlist), sym->stroff, sym->strsize);
@@ -2946,11 +3580,11 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 						// *nvalue += shared_cache_slide;
 					}
 					*/
-					if(seg_virtresolve(nvalue, &dseg, 1))
+					if(seg_virtresolves(nvalue, dsegs, ndsegs, 1))
 					{
 					//	PANIC("Missed virtresolve");
 					}
-					else if(seg_virtresolve(nvalue, &tseg, 1))
+					else if(seg_virtresolves(nvalue, &tseg, 1, 1))
 					{
 					//	PANIC("Missed virtresolve");
 					}
@@ -3000,30 +3634,36 @@ void extract_file(uintptr_t xbuf, const char* fname)//name)
 		dyld_cache_slide_info_entry* slide_entries = (dyld_cache_slide_info_entry*) ((uintptr_t)slide + slide->entries_offset);
 		
 		uint32_t missed_dyld = 0;
-		for(uint32_t i = (dseg.old.vmaddr.start - dataCacheOffset) / 0x1000, k=0; i < (dseg.old.vmaddr.end - dataCacheOffset) / 0x1000; i++, k++)
+		
+		for(int ds=0; ds<ndsegs; ds++)
 		{
-			uint8_t *bits = slide_entries[slide_toc_index[i]].bits;
-			uintptr_t pagebase = dseg.fix.buf + 0x1000 * k;
-			
-			for(uint32_t j=0; j<0x1000/4; j++)
+			for(uint32_t i = (dsegs[ds].old.vmaddr.start - dataCacheOffset) / 0x1000, k=0; i < (dsegs[ds].old.vmaddr.end - dataCacheOffset) / 0x1000; i++, k++)
 			{
-				if(bits[j>>3] & (1<<(j&7)))
+				uint8_t *bits = slide_entries[slide_toc_index[i]].bits;
+				uintptr_t pagebase = dsegs[ds].fix.buf + 0x1000 * k;
+				
+				for(uint32_t j=0; j<0x1000/4; j++)
 				{
-					if(in_dyld_cache(*(uint32_t*)(pagebase + j*4)))
+					if(bits[j>>3] & (1<<(j&7)))
 					{
-						missed_dyld++;
+						if(in_dyld_cache(*(uint32_t*)(pagebase + j*4)))
+						{
+							missed_dyld++;
+						}
 					}
 				}
+				//PANIC("Done trying");
 			}
-			//PANIC("Done trying");
 		}
+		
+		
 		if(missed_dyld)
 		{
-		//	CommonLog("Still missed %d slide external references! :(", missed_dyld);
+			CommonLog("Still missed %d slide external references! :(", missed_dyld);
 		}
 		else
 		{
-		//	CommonLog("Yay! Got rid of all the slide external references!");
+			CommonLog("Yay! Got rid of all the slide external references!");
 		}
 	}
 	
@@ -3240,6 +3880,9 @@ int main(int argc, char** argv)
 	
 	//CommonLog("ptraddr = %x", ptraddr);
 	//exit(1);
+	
+	
+	
 	if(!extractname)
 	{
 		char outpath[0x80];
@@ -3271,6 +3914,8 @@ int main(int argc, char** argv)
 		uint32_t extract_offs;
 		find_file(extractname, &extract_offs);
 		uintptr_t extract_buf = dyld_buf + extract_offs;
+		
+		CommonLog("offset %x", extract_offs);
 		extract_file(extract_buf, outname);
 	}
 	
