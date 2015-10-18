@@ -2,7 +2,12 @@ Decache
 
 -----
 
-Decache extracts working and completely valid files from an iOS dyld shared cache.
+Decache extracts working and completely valid files from an iOS dyld shared cache.*
+
+* Used to...it currently is built for 9.0 armv7s
+
+
+
 
 Compilation:
   Link your theos directory to ./theos
